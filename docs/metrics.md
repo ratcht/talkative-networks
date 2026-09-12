@@ -98,7 +98,7 @@ The substance of what's transmitted — send (value) → combine (aggregated) �
 
 **Summary.** Mean per-row (per-receiver) entropy of the bus's attention weights over senders, averaged across the batch.
 
-**Computation.** -(attn * attn.log()).sum(-1) computed on TarMACBus's post-softmax attn (b, n, n) inside Orchestrator.forward, then meaned over both the receiver and batch dims to one scalar per step.
+**Computation.** -(attn * attn.log()).sum(-1) computed on TarMACBus's post-softmax attn (b, p, n, n) inside Orchestrator.forward, then meaned over the receiver, patch and batch dims to one scalar per step (p=1 under --patch 0).
 
 **Intent.** How concentrated each receiver's attention is over the n senders. Low and falling means receivers are converging onto ~one sender each (a de-facto hard selection); high and flat near log(n) (uniform attention) means every receiver is just averaging all senders equally, which — combined with a flat msg_norm — would suggest attention isn't discriminating at all.
 
@@ -108,7 +108,7 @@ Tracked with no context — one series.
 
 **Summary.** Mean peak attention weight, max_i p_i, over the bus's post-softmax attention rows, averaged across receivers and the batch.
 
-**Computation.** attn.max(dim=-1).values.mean() on TarMACBus's (b, n, n) post-softmax attn inside Orchestrator.forward, meaned over the receiver and batch dims to one scalar per step — the same rows attn_entropy summarizes.
+**Computation.** attn.max(dim=-1).values.mean() on TarMACBus's (b, p, n, n) post-softmax attn inside Orchestrator.forward, meaned over the receiver, patch and batch dims to one scalar per step — the same rows attn_entropy summarizes.
 
 **Intent.** Concentration on a scale that reads directly: 1/n is uniform, 1.0 is a hard one-hot gate, and the number is comparable across groups of different size in a way entropy's log(n) ceiling is not. Read with attn_entropy — the two separate a row with one dominant sender and a flat tail (high top1, mid entropy) from one split evenly between two senders (mid top1, mid entropy), which entropy alone conflates.
 
@@ -149,7 +149,7 @@ Tracked with no context — one series.
 
 **Summary.** Fraction of (example, receiver) pairs whose argmax attention is the receiver's own message.
 
-**Computation.** routing_counts() takes attn.argmax(-1) over the bus's (b, n, n) attention and counts how often a receiver's peak lands on its own index, over all receivers and examples in the batch. Tracked per step on train batches and per epoch over the full val set (val_self_attn_rate).
+**Computation.** routing_counts() takes attn.argmax(-1) over the bus's (b, p, n, n) attention and counts how often a receiver's peak lands on its own index, over all receivers, patches and examples in the batch. Tracked per step on train batches and per epoch over the full val set (val_self_attn_rate).
 
 **Intent.** TarMACBus lets every member attend over all members including itself, so a receiver can route to its own message. High self-attention means communication is largely not happening — the receiver is reading itself back. It is also the confound that makes routed_correct's corrected split circular, which is why routed_correct excludes these pairs.
 

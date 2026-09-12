@@ -258,9 +258,9 @@ _DOCS: tuple[MetricDoc, ...] = (
     summary="Mean per-row (per-receiver) entropy of the bus's attention "
             "weights over senders, averaged across the batch.",
     computation="-(attn * attn.log()).sum(-1) computed on TarMACBus's "
-                "post-softmax attn (b, n, n) inside Orchestrator.forward, "
-                "then meaned over both the receiver and batch dims to one "
-                "scalar per step.",
+                "post-softmax attn (b, p, n, n) inside Orchestrator.forward, "
+                "then meaned over the receiver, patch and batch dims to one "
+                "scalar per step (p=1 under --patch 0).",
     intent="How concentrated each receiver's attention is over the n "
            "senders. Low and falling means receivers are converging onto "
            "~one sender each (a de-facto hard selection); high and flat near "
@@ -274,10 +274,10 @@ _DOCS: tuple[MetricDoc, ...] = (
     summary="Mean peak attention weight, max_i p_i, over the bus's "
             "post-softmax attention rows, averaged across receivers and the "
             "batch.",
-    computation="attn.max(dim=-1).values.mean() on TarMACBus's (b, n, n) "
+    computation="attn.max(dim=-1).values.mean() on TarMACBus's (b, p, n, n) "
                 "post-softmax attn inside Orchestrator.forward, meaned over "
-                "the receiver and batch dims to one scalar per step — the "
-                "same rows attn_entropy summarizes.",
+                "the receiver, patch and batch dims to one scalar per step — "
+                "the same rows attn_entropy summarizes.",
     intent="Concentration on a scale that reads directly: 1/n is uniform, "
            "1.0 is a hard one-hot gate, and the number is comparable across "
            "groups of different size in a way entropy's log(n) ceiling is "
@@ -319,10 +319,10 @@ _DOCS: tuple[MetricDoc, ...] = (
     summary="Fraction of (example, receiver) pairs whose argmax attention is "
             "the receiver's own message.",
     computation="routing_counts() takes attn.argmax(-1) over the bus's "
-                "(b, n, n) attention and counts how often a receiver's peak "
-                "lands on its own index, over all receivers and examples in "
-                "the batch. Tracked per step on train batches and per epoch "
-                "over the full val set (val_self_attn_rate).",
+                "(b, p, n, n) attention and counts how often a receiver's peak "
+                "lands on its own index, over all receivers, patches and "
+                "examples in the batch. Tracked per step on train batches and "
+                "per epoch over the full val set (val_self_attn_rate).",
     intent="TarMACBus lets every member attend over all members including "
            "itself, so a receiver can route to its own message. High "
            "self-attention means communication is largely not happening — the "
