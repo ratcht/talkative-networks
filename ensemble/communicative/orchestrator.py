@@ -73,14 +73,15 @@ class Orchestrator(nn.Module):
       # perception pass + k communication rounds; Q/K/V are recomputed each
       # pass from the updated late features (recurrence via the backbone)
       for round_idx in range(k_rounds + 1):
-        Q = t.zeros((b, n, self.key_dim), device=device)
-        K = t.zeros((b, n, self.key_dim), device=device)
-        V = t.zeros((b, n, self.value_dim), device=device)
-
+        qkv = []
         for i, s in enumerate(self.specialists):
           assert isinstance(s, Specialist)
           outputs[i] = s.driver.backbone(xs[i])
-          Q[:, i], K[:, i], V[:, i] = s.encoder(encoder_ins[i].value)
+          qkv.append(s.encoder(encoder_ins[i].value))
+
+        # specialist axis goes just before the feature dim, so this holds whether
+        # the encoder pools to (b, d) or emits patch tokens (b, p, d)
+        Q, K, V = (t.stack(x, dim=-2) for x in zip(*qkv))
 
         if round_idx == k_rounds:
           break
@@ -92,7 +93,7 @@ class Orchestrator(nn.Module):
         # aggregate messages and stage them for injection on the next pass
         c, _ = self.bus(Q, K, V)
         for i, s in enumerate(self.specialists):
-          decoder_outs[i].value = s.decoder(c[:, i])
+          decoder_outs[i].value = s.decoder(c[..., i, :])
 
         # mean L2 norms of what is said, what is heard, and what is injected —
         # a collapse toward zero here means the continuous messages vanished

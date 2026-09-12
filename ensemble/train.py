@@ -418,8 +418,8 @@ def resolve_specialist_specs(
 
 
 @torch.no_grad()
-def _adapter_dims(backbone: nn.Module, early: str, late: str, device: str) -> tuple[int, int]:
-  """Channel widths the decoder injects into / the encoder reads from."""
+def _adapter_dims(backbone: nn.Module, early: str, late: str, device: str) -> tuple[tuple, tuple]:
+  """Shapes the decoder injects into / the encoder reads from, both (b, c, h, w)."""
   shapes = {}
   h_early = backbone.get_submodule(early).register_forward_pre_hook(
     lambda m, inp: shapes.__setitem__("early_in", inp[0].shape)
@@ -430,7 +430,7 @@ def _adapter_dims(backbone: nn.Module, early: str, late: str, device: str) -> tu
   backbone(torch.zeros(1, 3, 32, 32, device=device))
   h_early.remove()
   h_late.remove()
-  return shapes["early_in"][1], shapes["late_out"][1]
+  return shapes["early_in"], shapes["late_out"]
 
 
 def build_communicative(
@@ -439,21 +439,33 @@ def build_communicative(
   value_dim: int,
   num_classes: int,
   device: str,
+  patch: int = 1,
 ) -> Orchestrator:
-  from einops.layers.torch import Reduce, Rearrange
+  from einops.layers.torch import Rearrange
 
   specialists = []
   for spec in specs:
     model = _load_backbone(spec.backbone_path, device)
     # per-spec, not once from specialists[0]: early/late can now differ per
     # specialist, so each one's own adapter dims must be measured separately
-    early_ch, late_ch = _adapter_dims(model, spec.early, spec.late, device)
+    (_, early_ch, eh, ew), (_, late_ch, lh, lw) = _adapter_dims(
+      model, spec.early, spec.late, device)
+    # late grid -> msg_h*msg_w blocks of patch*patch. each block gets its own
+    # attention over the n specialists, then expands to up_h*up_w on the early grid
+    msg_h, msg_w = lh // patch, lw // patch
+    up_h, up_w = eh // msg_h, ew // msg_w
+    assert (lh, lw) == (msg_h * patch, msg_w * patch) and (eh, ew) == (msg_h * up_h, msg_w * up_w), \
+      f"patch {patch} doesnt tile late {(lh, lw)} / early {(eh, ew)}"
     decoder_cls = DECODERS[spec.decoder]
     encoder_cls = ENCODERS[spec.encoder]
     specialists.append(Specialist(
       Driver(model, spec.early, spec.late),
-      decoder_cls(value_dim, early_ch, Rearrange("b c -> b c 1 1")),
-      encoder_cls(late_ch, key_dim, value_dim, Reduce("b c h w -> b c", "mean")),
+      decoder_cls(value_dim, early_ch * up_h * up_w,
+                  Rearrange("b (msg_h msg_w) (c up_h up_w) -> b c (msg_h up_h) (msg_w up_w)",
+                            msg_h=msg_h, up_h=up_h, up_w=up_w)),
+      encoder_cls(late_ch * patch * patch, key_dim, value_dim,
+                  Rearrange("b c (msg_h ph) (msg_w pw) -> b (msg_h msg_w) (c ph pw)",
+                            ph=patch, pw=patch)),
     ))
   return Orchestrator(specialists, key_dim, value_dim, num_classes).to(device)
 
@@ -540,6 +552,9 @@ def main() -> None:
                  help="Decoder head architecture (default for all specialists)")
   p.add_argument("--key-dim", type=int, default=16)
   p.add_argument("--value-dim", type=int, default=64)
+  p.add_argument("--patch", type=int, default=1,
+                 help="Patch size k over the late grid; one attention per k*k patch "
+                      "(1 = per-position). Must tile both the late and early grids.")
   p.add_argument("--k-rounds", type=int, default=1,
                  help="Communication rounds (backbone passes = k_rounds + 1)")
   p.add_argument("--epochs", type=int, default=10)
@@ -585,7 +600,7 @@ def main() -> None:
   )
   specs = resolve_specialist_specs(backbone_paths, args, args.specialist_config)
   orchestrator = build_communicative(
-    specs, args.key_dim, args.value_dim, args.num_classes, args.device,
+    specs, args.key_dim, args.value_dim, args.num_classes, args.device, args.patch,
   )
   n_trainable = sum(p.numel() for p in orchestrator.parameters() if p.requires_grad)
   print(f"[communicative] {len(backbone_paths)} backbones  k_rounds={args.k_rounds}  "
@@ -616,7 +631,7 @@ def main() -> None:
       "early": args.early, "late": args.late,
       "encoder": args.encoder, "decoder": args.decoder,
       "key_dim": args.key_dim, "value_dim": args.value_dim,
-      "k_rounds": args.k_rounds,
+      "k_rounds": args.k_rounds, "patch": args.patch,
       "batch_size": args.batch_size,
       "deterministic": args.deterministic,
     }
@@ -664,7 +679,7 @@ def main() -> None:
       "early": args.early, "late": args.late,
       "encoder": args.encoder, "decoder": args.decoder,
       "key_dim": args.key_dim, "value_dim": args.value_dim,
-      "k_rounds": args.k_rounds,
+      "k_rounds": args.k_rounds, "patch": args.patch,
       "baseline_avg_probs": baseline,
       **final_flat,
       **asdict(cfg),
