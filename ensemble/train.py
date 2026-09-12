@@ -33,6 +33,7 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from aim import Repo, Run
+from einops import rearrange, repeat
 from tqdm.auto import tqdm
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -213,8 +214,9 @@ def routing_counts(
 ) -> dict[str, tuple[int, int]]:
   """Who each receiver routed to, and whether that specialist was right.
 
-  attn: (b, n, n) post-softmax attention, receiver-major. pre/post: (n, b, C)
-  per-specialist logits from before/after communication. y: (b,) labels.
+  attn: (b, p, n, n) post-softmax attention, receiver-major, p messages per
+  specialist (1 when pooled). pre/post: (n, b, C) per-specialist logits from
+  before/after communication. y: (b,) labels.
 
   Entropy says how concentrated routing is; this says who it concentrated *on*,
   which is the part that can be right or wrong. A sharp gate onto the wrong
@@ -232,7 +234,12 @@ def routing_counts(
   scoring its self-attention as a routing miss measures the definition rather
   than the routing.
   """
-  n = attn.shape[1]
+  p = attn.shape[1]
+  attn = rearrange(attn, "b p i j -> (b p) i j")
+  pre, post = (repeat(x, "n b c -> n (b p) c", p=p) for x in (pre, post))
+  y = repeat(y, "b -> (b p)", p=p)
+
+  n = attn.shape[-1]
   attended = attn.argmax(-1)                                       # (b, n)
   is_self = attended == torch.arange(n, device=attn.device)[None, :]
   non_self = ~is_self
@@ -277,7 +284,7 @@ def _merge_tally(into: dict[int, int], new: dict[int, int]) -> None:
 def routing_pattern_counts(attn: torch.Tensor) -> dict[str, dict[int, int]]:
   """How often each routing pattern occurs, jointly and per receiver.
 
-  attn: (b, n, n) post-softmax attention, receiver-major.
+  attn: (b, p, n, n) post-softmax attention, receiver-major.
 
   A *pattern* is one example's whole wiring diagram — the tuple of argmax
   senders across all n receivers at once, e.g. (0, 2, 2) — encoded base-n into
@@ -289,7 +296,8 @@ def routing_pattern_counts(attn: torch.Tensor) -> dict[str, dict[int, int]]:
   take the mode once at the end, since the modal pattern of the whole set need
   not be the modal pattern of any single batch.
   """
-  n = attn.shape[1]
+  attn = rearrange(attn, "b p i j -> (b p) i j")
+  n = attn.shape[-1]
   attended = attn.argmax(-1)                                       # (b, n)
 
   out: dict[str, dict[int, int]] = {}
@@ -671,9 +679,9 @@ def build_communicative(
   value_dim: int,
   num_classes: int,
   device: str,
-  patch: int = 1,
+  patch: int = 0,
 ) -> Orchestrator:
-  from einops.layers.torch import Rearrange
+  from einops.layers.torch import Reduce, Rearrange
 
   specialists = []
   for spec in specs:
@@ -682,22 +690,28 @@ def build_communicative(
     # specialist, so each one's own adapter dims must be measured separately
     (_, early_ch, eh, ew), (_, late_ch, lh, lw) = _adapter_dims(
       model, spec.early, spec.late, device)
-    # late grid -> msg_h*msg_w blocks of patch*patch. each block gets its own
-    # attention over the n specialists, then expands to up_h*up_w on the early grid
-    msg_h, msg_w = lh // patch, lw // patch
-    up_h, up_w = eh // msg_h, ew // msg_w
-    assert (lh, lw) == (msg_h * patch, msg_w * patch) and (eh, ew) == (msg_h * up_h, msg_w * up_w), \
-      f"patch {patch} doesnt tile late {(lh, lw)} / early {(eh, ew)}"
+    if patch == 0:
+      enc_in, reduce = late_ch, Reduce("b c h w -> b 1 c", "mean")
+      dec_out, expand = early_ch, Rearrange("b 1 c -> b c 1 1")
+    else:
+      # late grid -> msg_h*msg_w blocks of patch*patch. each block gets its own
+      # attention over the n specialists, then expands to up_h*up_w on the early grid
+      msg_h, msg_w = lh // patch, lw // patch
+      up_h, up_w = eh // msg_h, ew // msg_w
+      assert (lh, lw) == (msg_h * patch, msg_w * patch) and (eh, ew) == (msg_h * up_h, msg_w * up_w), \
+        f"patch {patch} doesnt tile late {(lh, lw)} / early {(eh, ew)}"
+      enc_in = late_ch * patch * patch
+      reduce = Rearrange("b c (msg_h ph) (msg_w pw) -> b (msg_h msg_w) (c ph pw)",
+                         ph=patch, pw=patch)
+      dec_out = early_ch * up_h * up_w
+      expand = Rearrange("b (msg_h msg_w) (c up_h up_w) -> b c (msg_h up_h) (msg_w up_w)",
+                         msg_h=msg_h, up_h=up_h, up_w=up_w)
     decoder_cls = DECODERS[spec.decoder]
     encoder_cls = ENCODERS[spec.encoder]
     specialists.append(Specialist(
       Driver(model, spec.early, spec.late),
-      decoder_cls(value_dim, early_ch * up_h * up_w,
-                  Rearrange("b (msg_h msg_w) (c up_h up_w) -> b c (msg_h up_h) (msg_w up_w)",
-                            msg_h=msg_h, up_h=up_h, up_w=up_w)),
-      encoder_cls(late_ch * patch * patch, key_dim, value_dim,
-                  Rearrange("b c (msg_h ph) (msg_w pw) -> b (msg_h msg_w) (c ph pw)",
-                            ph=patch, pw=patch)),
+      decoder_cls(value_dim, dec_out, expand),
+      encoder_cls(enc_in, key_dim, value_dim, reduce),
     ))
   return Orchestrator(specialists, key_dim, value_dim, num_classes).to(device)
 
@@ -784,9 +798,10 @@ def main() -> None:
                  help="Decoder head architecture (default for all specialists)")
   p.add_argument("--key-dim", type=int, default=16)
   p.add_argument("--value-dim", type=int, default=64)
-  p.add_argument("--patch", type=int, default=1,
+  p.add_argument("--patch", type=int, default=0,
                  help="Patch size k over the late grid; one attention per k*k patch "
-                      "(1 = per-position). Must tile both the late and early grids.")
+                      "(1 = per-position, 0 = mean-pool to one message). Must tile "
+                      "both the late and early grids.")
   p.add_argument("--k-rounds", type=int, default=1,
                  help="Communication rounds (backbone passes = k_rounds + 1)")
   p.add_argument("--epochs", type=int, default=10)
@@ -903,7 +918,7 @@ def main() -> None:
   # encoder study shares one fixed expert group, so a backbone-only name makes
   # every arm and every seed collide on one path and silently overwrite
   stems = "_".join(p.stem for p in backbone_paths)
-  arch = f"{args.encoder}_k{args.key_dim}_v{args.value_dim}_r{args.k_rounds}"
+  arch = f"{args.encoder}_p{args.patch}_k{args.key_dim}_v{args.value_dim}_r{args.k_rounds}"
   out = args.output_dir / f"communicative_{stems}_{arch}_seed{args.seed}.pt"
   out.parent.mkdir(parents=True, exist_ok=True)
   torch.save({

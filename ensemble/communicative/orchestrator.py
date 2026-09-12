@@ -39,7 +39,7 @@ class Orchestrator(nn.Module):
     # the other half of the concentration picture: entropy is a whole-row
     # summary, this is just how much mass the winner took
     self.last_attn_top1: float | None = None
-    # the bus's post-softmax attention itself, (b, n, n), detached — entropy
+    # the bus's post-softmax attention itself, (b, p, n, n), detached — entropy
     # says how concentrated routing is, this says who it concentrated *on*
     self.last_attn: t.Tensor | None = None
     # per-specialist logits before (perception pass) and after communication,
@@ -92,8 +92,8 @@ class Orchestrator(nn.Module):
           outputs[i] = s.driver.backbone(xs[i])
           qkv.append(s.encoder(encoder_ins[i].value))
 
-        # specialist axis goes just before the feature dim, so this holds whether
-        # the encoder pools to (b, d) or emits patch tokens (b, p, d)
+        # encoders emit (b, p, d), p=1 when pooled; specialist axis goes just
+        # before the feature dim
         Q, K, V = (t.stack(x, dim=-2) for x in zip(*qkv))
 
         if round_idx == k_rounds:
