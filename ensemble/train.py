@@ -23,7 +23,7 @@ import random
 import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -42,6 +42,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 from backbone.resnet import ResNet
 from ensemble.communicative.driver import Driver
 from ensemble.communicative.bus import QKVEncoder, MLPEncoder, MLPNoLNEncoder, Decoder, FiLMDecoder
+from ensemble.communicative.bus import TarMACBus, all_mask, others_mask, self_mask
 from ensemble.communicative.orchestrator import Specialist, Orchestrator
 from ensemble.eval import evaluate
 from ensemble import metric_docs
@@ -641,6 +642,7 @@ class SpecialistSpec:
 # registering a class here, never by editing build_communicative.
 ENCODERS: dict[str, type] = {"qkv": QKVEncoder, "mlp": MLPEncoder, "mlp_no_ln": MLPNoLNEncoder}
 DECODERS: dict[str, type] = {"mlp": Decoder, "film": FiLMDecoder}
+MASKS: dict[str, Callable[[int], torch.Tensor]] = {"all": all_mask, "others": others_mask, "self": self_mask}
 
 
 def resolve_specialist_specs(
@@ -696,6 +698,7 @@ def build_communicative(
   num_classes: int,
   device: str,
   patch: int = 0,
+  attn: str = "all",
 ) -> Orchestrator:
   from einops.layers.torch import Reduce, Rearrange
 
@@ -729,7 +732,8 @@ def build_communicative(
       decoder_cls(value_dim, dec_out, expand),
       encoder_cls(enc_in, key_dim, value_dim, reduce),
     ))
-  return Orchestrator(specialists, key_dim, value_dim, num_classes).to(device)
+  bus = TarMACBus(MASKS[attn](len(specs)))
+  return Orchestrator(specialists, bus, key_dim, value_dim, num_classes).to(device)
 
 
 def _resolve_backbone_paths(manifest: Optional[Path], backbones: Optional[list[Path]]) -> list[Path]:
@@ -823,6 +827,8 @@ def main() -> None:
   p.add_argument("--freeze-fc", action="store_true", help="Freeze each backbone's fc")
   p.add_argument("--patience", type=int, default=0, help="Early stopping patience in epochs (0 = off)")
   p.add_argument("--member-loss", type=float, default=0.0, help="Weight on per-member CE loss (0 = off)")
+  p.add_argument("--attn", default="all", choices=sorted(MASKS), help="Which senders each receiver can attend to")
+  p.add_argument("--unfreeze", nargs="*", default=[], help="Backbone blocks to train, e.g. layer1.2")
   p.add_argument("--epochs", type=int, default=10)
   p.add_argument("--lr", type=float, default=1e-3)
   p.add_argument("--weight-decay", type=float, default=1e-4)
@@ -867,12 +873,16 @@ def main() -> None:
   )
   specs = resolve_specialist_specs(backbone_paths, args, args.specialist_config)
   orchestrator = build_communicative(
-    specs, args.key_dim, args.value_dim, args.num_classes, args.device, args.patch,
+    specs, args.key_dim, args.value_dim, args.num_classes, args.device, args.patch, args.attn,
   )
   if args.freeze_fc:
     for s in orchestrator.specialists:
       assert isinstance(s, Specialist)
       s.driver.backbone.fc.requires_grad_(False)
+  for s in orchestrator.specialists:
+    assert isinstance(s, Specialist)
+    for name in args.unfreeze:
+      s.driver.backbone.get_submodule(name).requires_grad_(True)
   n_trainable = sum(p.numel() for p in orchestrator.parameters() if p.requires_grad)
   print(f"[communicative] {len(backbone_paths)} backbones  k_rounds={args.k_rounds}  "
         f"trainable params={n_trainable:,}")
@@ -906,6 +916,7 @@ def main() -> None:
       "batch_size": args.batch_size,
       "deterministic": args.deterministic,
       "freeze_fc": args.freeze_fc,
+      "attn": args.attn, "unfreeze": args.unfreeze,
     }
     run["baseline_avg_probs"] = baseline
     run["metric_docs"] = metric_docs.as_dict()
@@ -954,6 +965,7 @@ def main() -> None:
       "key_dim": args.key_dim, "value_dim": args.value_dim,
       "k_rounds": args.k_rounds, "patch": args.patch,
       "freeze_fc": args.freeze_fc, "best_epoch": job.best_epoch,
+      "attn": args.attn, "unfreeze": args.unfreeze,
       "baseline_avg_probs": baseline,
       **final_flat,
       **asdict(cfg),

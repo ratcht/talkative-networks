@@ -20,10 +20,10 @@ class Specialist(nn.Module):
 
 
 class Orchestrator(nn.Module):
-  def __init__(self, specialists: list[Specialist], key_dim: int, value_dim: int, num_classes: int):
+  def __init__(self, specialists: list[Specialist], bus: TarMACBus, key_dim: int, value_dim: int, num_classes: int):
     super().__init__()
     self.specialists = nn.ModuleList(specialists)
-    self.bus = TarMACBus()
+    self.bus = bus
 
     self.key_dim = key_dim
     self.value_dim = value_dim

@@ -87,12 +87,31 @@ class FiLMDecoder(Decoder):
     super().__init__(value_dim, 2 * out_dim, expand)
 
 
+# (n, n) attention masks, True blocks receiver i from reading sender j
+def all_mask(n: int) -> t.Tensor:
+  return t.zeros(n, n, dtype=t.bool)
+
+# Mask out self
+def others_mask(n: int) -> t.Tensor:
+  return t.eye(n, dtype=t.bool)
+
+# Only self -> to use as a control
+def self_mask(n: int) -> t.Tensor:
+  return ~t.eye(n, dtype=t.bool)
+
+
 class TarMACBus(nn.Module):
   """Bare single-head scaled dot-product attention across ensemble members.
 
   Each member attends over all members including itself — with n=2, excluding
   self would collapse the softmax to a constant 1.
   """
+  mask: t.Tensor
+
+  def __init__(self, mask: t.Tensor):
+    super().__init__()
+    self.register_buffer("mask", mask, persistent=False)
+
   def forward(
     self,
     Q: t.Tensor,  # (b, n, key_dim)
@@ -100,5 +119,6 @@ class TarMACBus(nn.Module):
     V: t.Tensor,  # (b, n, value_dim)
   ) -> tuple[t.Tensor, t.Tensor]:
     scores = Q @ K.transpose(-2, -1) / math.sqrt(Q.shape[-1])  # (b, n, n)
+    scores = scores.masked_fill(self.mask, float("-inf"))
     attn = scores.softmax(dim=-1)
     return attn @ V, attn  # (b, n, value_dim), (b, n, n)
