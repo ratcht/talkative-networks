@@ -41,7 +41,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from backbone.resnet import ResNet
 from ensemble.communicative.driver import Driver
-from ensemble.communicative.bus import QKVEncoder, MLPEncoder, MLPNoLNEncoder, Decoder
+from ensemble.communicative.bus import QKVEncoder, MLPEncoder, MLPNoLNEncoder, Decoder, FiLMDecoder
 from ensemble.communicative.orchestrator import Specialist, Orchestrator
 from ensemble.eval import evaluate
 from ensemble import metric_docs
@@ -624,7 +624,7 @@ class SpecialistSpec:
 # .decoder refers to. Additive only: a new head architecture is added by
 # registering a class here, never by editing build_communicative.
 ENCODERS: dict[str, type] = {"qkv": QKVEncoder, "mlp": MLPEncoder, "mlp_no_ln": MLPNoLNEncoder}
-DECODERS: dict[str, type] = {"mlp": Decoder}
+DECODERS: dict[str, type] = {"mlp": Decoder, "film": FiLMDecoder}
 
 
 def resolve_specialist_specs(

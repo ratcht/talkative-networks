@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import torch as t
 import torch.nn as nn
 
+from ensemble.communicative.bus import Decoder, FiLMDecoder
+
 @dataclass
 class HookState:
   value: t.Tensor | None = None
@@ -24,6 +26,20 @@ def hook_decoder(layer: nn.Module, state: HookState):
 
 
 @contextmanager
+def hook_film(layer: nn.Module, state: HookState):
+  def fn(_, inputs):
+    if state.value is None:
+      return
+    gamma, beta = state.value.chunk(2, dim=1)
+    return (inputs[0] * (1 + gamma) + beta,)
+  handle = layer.register_forward_pre_hook(fn)
+  try:
+    yield
+  finally:
+    handle.remove()
+
+
+@contextmanager
 def hook_encoder(layer: nn.Module, state: HookState):
   def fn(_, __, output):
     state.value = output
@@ -32,3 +48,14 @@ def hook_encoder(layer: nn.Module, state: HookState):
     yield
   finally:
     handle.remove()
+
+
+_DECODER_HOOKS = {Decoder: hook_decoder, FiLMDecoder: hook_film}
+
+
+def get_decoder_hook(decoder: nn.Module):
+  return _DECODER_HOOKS[type(decoder)]
+
+
+def get_encoder_hook(encoder: nn.Module):
+  return hook_encoder

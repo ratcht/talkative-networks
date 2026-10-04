@@ -81,6 +81,12 @@ class Decoder(nn.Module):
     return self.expand(self.mlp(x))
 
 
+class FiLMDecoder(Decoder):
+  # outputs gamma, beta stacked on channels, applied by hook_film
+  def __init__(self, value_dim: int, out_dim: int, expand: nn.Module):
+    super().__init__(value_dim, 2 * out_dim, expand)
+
+
 class TarMACBus(nn.Module):
   """Bare single-head scaled dot-product attention across ensemble members.
 

@@ -7,7 +7,7 @@ import torch.nn.functional as F
 
 from ensemble.communicative.driver import Driver
 from ensemble.communicative.bus import QKVEncoder, Decoder, TarMACBus
-from ensemble.communicative.hooks import hook_encoder, hook_decoder, HookState
+from ensemble.communicative.hooks import get_encoder_hook, get_decoder_hook, HookState
 
 from typing import Annotated
 
@@ -55,9 +55,11 @@ class Orchestrator(nn.Module):
 
   def _register_hooks(self, stack: ExitStack, decoder_outs: list[HookState], encoder_ins: list[HookState]):
     for i, s in enumerate(self.specialists):
-      assert isinstance(s.driver, Driver)
-      stack.enter_context(hook_decoder(s.driver.early, decoder_outs[i]))
-      stack.enter_context(hook_encoder(s.driver.late, encoder_ins[i]))
+      assert isinstance(s, Specialist)
+      decoder_hook = get_decoder_hook(s.decoder)
+      encoder_hook = get_encoder_hook(s.encoder)
+      stack.enter_context(decoder_hook(s.driver.early, decoder_outs[i]))
+      stack.enter_context(encoder_hook(s.driver.late, encoder_ins[i]))
 
   def forward(self, xs: t.Tensor | list[t.Tensor], k_rounds: int = 1) -> t.Tensor:
     n: Annotated[int, "num_specialists"] = len(self.specialists)
@@ -106,6 +108,7 @@ class Orchestrator(nn.Module):
         # aggregate messages and stage them for injection on the next pass
         c, attn = self.bus(Q, K, V)
         for i, s in enumerate(self.specialists):
+          assert isinstance(s, Specialist)
           decoder_outs[i].value = s.decoder(c[..., i, :])
 
         # mean L2 norms of what is said, what is heard, and what is injected —
