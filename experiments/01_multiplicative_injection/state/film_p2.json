@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "config": {
+    "trailing": [
+      "communicative",
+      "--manifest",
+      "selection/manifests/encoder_study_group.json",
+      "--decoder",
+      "film",
+      "--patch",
+      "2",
+      "--epochs",
+      "70",
+      "--k-rounds",
+      "1",
+      "--output-dir",
+      "experiments/01_multiplicative_injection/checkpoints"
+    ],
+    "experiment": "film_p2",
+    "split_digest": "c6f2c9ce5e2f61af"
+  },
+  "seeds": {
+    "476981973": {
+      "status": "done",
+      "finished": "2026-10-04T06:04:35+00:00",
+      "elapsed_sec": 2827.4
+    },
+    "621715752": {
+      "status": "done",
+      "finished": "2026-10-04T06:51:42+00:00",
+      "elapsed_sec": 2827.0
+    },
+    "1882162633": {
+      "status": "done",
+      "finished": "2026-10-04T07:38:48+00:00",
+      "elapsed_sec": 2826.1
+    },
+    "2044397375": {
+      "status": "interrupted",
+      "at": "2026-10-04T07:48:39+00:00"
+    }
+  }
+}
