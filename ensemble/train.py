@@ -914,12 +914,7 @@ def main() -> None:
   if run is not None:
     run["final"] = final_flat
 
-  # architecture + seed are in the name, not just the backbones: every arm of an
-  # encoder study shares one fixed expert group, so a backbone-only name makes
-  # every arm and every seed collide on one path and silently overwrite
-  stems = "_".join(p.stem for p in backbone_paths)
-  arch = f"{args.encoder}_p{args.patch}_k{args.key_dim}_v{args.value_dim}_r{args.k_rounds}"
-  out = args.output_dir / f"communicative_{stems}_{arch}_seed{args.seed}.pt"
+  out = args.output_dir / args.experiment / f"seed{args.seed}.pt"
   out.parent.mkdir(parents=True, exist_ok=True)
   torch.save({
     "state_dict": orchestrator.state_dict(),
