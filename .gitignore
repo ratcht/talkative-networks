@@ -4,3 +4,4 @@
 data/**
 site/**
 experiments/*/checkpoints/
+uv.lock
