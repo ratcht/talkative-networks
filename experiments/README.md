@@ -6,7 +6,7 @@ One folder per experiment, numbered in the order they were run.
 |---|---|---|
 | 00 | [patch2_additive](00_patch2_additive/README.md) | done (3 of 4 seeds) |
 | 01 | [multiplicative_injection](01_multiplicative_injection/README.md) | done (film_p2: 3 of 4 seeds) |
-| 02 | [regularization](02_regularization/README.md) | done |
+| 02 | [overfitting](02_overfitting/README.md) | done |
 
 ## Layout
 

@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "config": {
+    "trailing": [
+      "communicative",
+      "--manifest",
+      "selection/manifests/encoder_study_group.json",
+      "--decoder",
+      "film",
+      "--epochs",
+      "70",
+      "--k-rounds",
+      "1",
+      "--output-dir",
+      "experiments/02_overfitting/checkpoints",
+      "--freeze-fc"
+    ],
+    "experiment": "reg_freeze_fc",
+    "split_digest": "c6f2c9ce5e2f61af"
+  },
+  "seeds": {
+    "476981973": {
+      "status": "done",
+      "finished": "2026-10-04T08:51:41+00:00",
+      "elapsed_sec": 2758.0
+    },
+    "621715752": {
+      "status": "done",
+      "finished": "2026-10-04T09:37:37+00:00",
+      "elapsed_sec": 2756.2
+    },
+    "1882162633": {
+      "status": "done",
+      "finished": "2026-10-04T10:23:35+00:00",
+      "elapsed_sec": 2757.4
+    }
+  }
+}
