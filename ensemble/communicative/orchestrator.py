@@ -45,6 +45,8 @@ class Orchestrator(nn.Module):
     # per-specialist logits before (perception pass) and after communication,
     # detached — lets the trainer measure how messages changed the answers
     self.last_shift: dict[str, t.Tensor] | None = None
+    # (n, b, c) logits from the last pass, kept w/ grad so train() can add a loss per member
+    self.last_logits: t.Tensor | None = None
 
   def train(self, mode: bool = True):
     super().train(mode)
@@ -134,6 +136,7 @@ class Orchestrator(nn.Module):
 
     if pre_logits is not None:
       self.last_shift = {"pre": pre_logits, "post": outputs.detach()}
+    self.last_logits = outputs
 
     # prob-averaged readout: log( mean_i softmax(logits_i) ), computed as a
     # logsumexp over per-member log-probs for numerical stability. Returns

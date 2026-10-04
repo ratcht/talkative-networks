@@ -76,6 +76,8 @@ class TrainConfig:
   seed: int
   log_every: int = 50
   device: str = "cuda"
+  patience: int = 0
+  member_loss: float = 0.0
 
 
 @dataclass
@@ -87,6 +89,7 @@ class TrainJob:
   config: TrainConfig
   run: Optional[Run] = None
   val_loader: Optional[DataLoader] = None  # if set, evaluated + tracked every epoch
+  best_epoch: Optional[int] = None
 
 
 # trainable components of the orchestrator, matched against parameter name
@@ -425,6 +428,7 @@ def train(job: TrainJob, *args, **kwargs) -> list[float]:
   step = 0
   # last epoch's val routing decisions, (N, n) argmax — see route_flip_rate
   prev_routes: Optional[torch.Tensor] = None
+  best, best_acc, best_epoch = None, -1.0, 0
 
   # endless val-batch stream: one batch per training step gives val_loss the
   # same frequency (and single-batch noise profile) as train_loss at the cost
@@ -446,6 +450,9 @@ def train(job: TrainJob, *args, **kwargs) -> list[float]:
 
         out = job.model(x, *args, **kwargs)
         loss = job.criterion(out, y)
+        if cfg.member_loss:
+          logits = job.model.last_logits
+          loss = loss + cfg.member_loss * sum(F.cross_entropy(l, y) for l in logits) / len(logits)
 
         correct += (out.detach().argmax(1) == y).sum().item()
         seen += y.size(0)
@@ -542,8 +549,17 @@ def train(job: TrainJob, *args, **kwargs) -> list[float]:
             job.run.track(flips, name="val_route_flip_rate", step=epoch, epoch=epoch)
         epoch_line += "  " + "  ".join(f"val_{k} {v:.4f}" for k, v in val.items())
       pbar.write(epoch_line)
+      if cfg.patience:
+        if val["accuracy"] > best_acc:
+          best_acc, best_epoch = val["accuracy"], epoch
+          best = {k: v.detach().clone() for k, v in job.model.state_dict().items()}
+        elif epoch - best_epoch >= cfg.patience:
+          break
   except KeyboardInterrupt:
     print(f"interrupted at step {step}")
+  if best is not None:
+    job.model.load_state_dict(best)
+    job.best_epoch = best_epoch + 1
   return losses
 
 
@@ -804,6 +820,9 @@ def main() -> None:
                       "both the late and early grids.")
   p.add_argument("--k-rounds", type=int, default=1,
                  help="Communication rounds (backbone passes = k_rounds + 1)")
+  p.add_argument("--freeze-fc", action="store_true", help="Freeze each backbone's fc")
+  p.add_argument("--patience", type=int, default=0, help="Early stopping patience in epochs (0 = off)")
+  p.add_argument("--member-loss", type=float, default=0.0, help="Weight on per-member CE loss (0 = off)")
   p.add_argument("--epochs", type=int, default=10)
   p.add_argument("--lr", type=float, default=1e-3)
   p.add_argument("--weight-decay", type=float, default=1e-4)
@@ -840,6 +859,7 @@ def main() -> None:
   cfg = TrainConfig(
     epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
     seed=args.seed, device=args.device,
+    patience=args.patience, member_loss=args.member_loss,
   )
 
   train_loader, val_loader, test_loader = make_loaders(
@@ -849,6 +869,10 @@ def main() -> None:
   orchestrator = build_communicative(
     specs, args.key_dim, args.value_dim, args.num_classes, args.device, args.patch,
   )
+  if args.freeze_fc:
+    for s in orchestrator.specialists:
+      assert isinstance(s, Specialist)
+      s.driver.backbone.fc.requires_grad_(False)
   n_trainable = sum(p.numel() for p in orchestrator.parameters() if p.requires_grad)
   print(f"[communicative] {len(backbone_paths)} backbones  k_rounds={args.k_rounds}  "
         f"trainable params={n_trainable:,}")
@@ -881,6 +905,7 @@ def main() -> None:
       "k_rounds": args.k_rounds, "patch": args.patch,
       "batch_size": args.batch_size,
       "deterministic": args.deterministic,
+      "freeze_fc": args.freeze_fc,
     }
     run["baseline_avg_probs"] = baseline
     run["metric_docs"] = metric_docs.as_dict()
@@ -895,6 +920,8 @@ def main() -> None:
     criterion=criterion, config=cfg, run=run, val_loader=val_loader,
   )
   train(job, k_rounds=args.k_rounds)
+  if run is not None:
+    run["best_epoch"] = job.best_epoch
 
   results = {}
   for name, loader in (("val", val_loader), ("test", test_loader)):
@@ -926,6 +953,7 @@ def main() -> None:
       "encoder": args.encoder, "decoder": args.decoder,
       "key_dim": args.key_dim, "value_dim": args.value_dim,
       "k_rounds": args.k_rounds, "patch": args.patch,
+      "freeze_fc": args.freeze_fc, "best_epoch": job.best_epoch,
       "baseline_avg_probs": baseline,
       **final_flat,
       **asdict(cfg),
