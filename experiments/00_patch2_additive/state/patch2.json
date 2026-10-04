@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "config": {
+    "trailing": [
+      "communicative",
+      "--manifest",
+      "selection/manifests/encoder_study_group.json",
+      "--patch",
+      "2",
+      "--epochs",
+      "70",
+      "--k-rounds",
+      "2"
+    ],
+    "experiment": "patch2",
+    "split_digest": "c6f2c9ce5e2f61af"
+  },
+  "seeds": {
+    "476981973": {
+      "status": "done",
+      "finished": "2026-09-07T08:00:16+00:00",
+      "elapsed_sec": 4580.0
+    },
+    "621715752": {
+      "status": "done",
+      "finished": "2026-09-07T19:43:55+00:00",
+      "elapsed_sec": 4555.6
+    },
+    "1882162633": {
+      "status": "done",
+      "finished": "2026-09-07T20:59:32+00:00",
+      "elapsed_sec": 4536.6
+    },
+    "2044397375": {
+      "status": "interrupted",
+      "at": "2026-09-07T21:46:46+00:00"
+    }
+  }
+}
