@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "config": {
+    "trailing": [
+      "communicative",
+      "--manifest",
+      "selection/manifests/encoder_study_group.json",
+      "--epochs",
+      "70",
+      "--patience",
+      "10",
+      "--freeze-fc",
+      "--output-dir",
+      "experiments/03_attention_masking/checkpoints",
+      "--decoder",
+      "film",
+      "--attn",
+      "self"
+    ],
+    "experiment": "mask_film_self",
+    "split_digest": "c6f2c9ce5e2f61af"
+  },
+  "seeds": {
+    "476981973": {
+      "status": "done",
+      "finished": "2026-10-04T19:51:37+00:00",
+      "elapsed_sec": 284.1
+    },
+    "621715752": {
+      "status": "done",
+      "finished": "2026-10-04T19:57:06+00:00",
+      "elapsed_sec": 328.9
+    },
+    "1882162633": {
+      "status": "done",
+      "finished": "2026-10-04T20:00:48+00:00",
+      "elapsed_sec": 222.2
+    }
+  }
+}

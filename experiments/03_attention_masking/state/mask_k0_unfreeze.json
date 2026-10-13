@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "config": {
+    "trailing": [
+      "communicative",
+      "--manifest",
+      "selection/manifests/encoder_study_group.json",
+      "--epochs",
+      "70",
+      "--patience",
+      "10",
+      "--freeze-fc",
+      "--output-dir",
+      "experiments/03_attention_masking/checkpoints",
+      "--k-rounds",
+      "0",
+      "--unfreeze",
+      "layer1.2",
+      "layer1.3",
+      "layer1.4"
+    ],
+    "experiment": "mask_k0_unfreeze",
+    "split_digest": "c6f2c9ce5e2f61af"
+  },
+  "seeds": {
+    "476981973": {
+      "status": "failed",
+      "finished": "2026-10-04T20:56:59+00:00",
+      "elapsed_sec": 17.0,
+      "returncode": 1
+    },
+    "621715752": {
+      "status": "failed",
+      "finished": "2026-10-04T20:57:16+00:00",
+      "elapsed_sec": 17.1,
+      "returncode": 1
+    },
+    "1882162633": {
+      "status": "failed",
+      "finished": "2026-10-04T20:57:33+00:00",
+      "elapsed_sec": 16.8,
+      "returncode": 1
+    }
+  }
+}
