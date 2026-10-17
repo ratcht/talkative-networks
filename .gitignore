@@ -5,3 +5,4 @@ data/**
 site/**
 experiments/*/checkpoints/
 uv.lock
+experiments/*/run.log

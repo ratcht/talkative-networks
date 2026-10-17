@@ -146,4 +146,4 @@ K = 0 (no communication) = untrained probability averaging: test 0.6652.
 - `hooks.py`: one `hook_inject` with `INJECTIONS` (`--inject {add,film,replace}`). Each mode sets how the message combines with the input, the decoder output width, and the decoder init. FiLM moved here from `--decoder film`.
 - `train.py`: flag `--patch-attn`.
 - `train.py` logging: block 1 attention metrics as now. Block 2 attention has shape (b, n, P, P), so only its entropy is tracked. Block 2 gets its own `grad_norm` component (`patch_attn`).
-- `experiments/04_patch_attention/`: README, `run.sh`, `commands.md`.
+- `experiments/04_patch_attention/`: README, `run.py`, `commands.md`.

@@ -1,24 +1,28 @@
 # Commands
 
-Run from the repo root.
+Run from the repo root on the lab machine.
 
-## 1. Start screen
-
-```bash
-screen -S pattn
-```
-
-## 2. Run all 18 arms
+## 1. Get the branch
 
 ```bash
-systemd-inhibit --what=sleep:idle --why="patch attention" bash -c 'for a in p0_linear_add p0_mlp_add p1_linear_add_pattn p1_linear_replace_pattn p1_mlp_add_pattn p1_mlp_replace_pattn p1_linear_add p1_linear_replace p1_mlp_add p1_mlp_replace p2_linear_add_pattn p2_linear_replace_pattn p2_mlp_add_pattn p2_mlp_replace_pattn p2_linear_add p2_linear_replace p2_mlp_add p2_mlp_replace; do bash experiments/04_patch_attention/run.sh $a || exit 1; done'
+git fetch && git checkout comm-experiments && git pull
 ```
 
-Detach: `Ctrl-a` then `d`. Reattach:
+## 2. Start all 18 arms in a detached screen, logging to run.log
 
 ```bash
-screen -r pattn
+screen -dmS pattn -L -Logfile experiments/04_patch_attention/run.log uv run python experiments/04_patch_attention/run.py
 ```
+
+Pick a GPU by putting `CUDA_VISIBLE_DEVICES=1` in front of `screen`. Run only some arms by listing them at the end, e.g. `... run.py p2_mlp_add p2_mlp_replace`.
+
+## 3. Watch it
+
+```bash
+tail -f experiments/04_patch_attention/run.log
+```
+
+Or attach with `screen -r pattn` (detach: `Ctrl-a` then `d`).
 
 ## If it gets interrupted
 
