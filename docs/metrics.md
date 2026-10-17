@@ -20,6 +20,16 @@ Traditional ML signal — is the ensemble learning, how accurate is it. Method-a
 
 Tracked with no context — one series.
 
+#### `final_test_accuracy_endpoint`
+
+**Summary.** Test accuracy averaged over a five-epoch window centred on the epoch with the highest validation accuracy.
+
+**Computation.** windowed_endpoint() in ensemble/train.py over the per-epoch val_accuracy and test_accuracy series, clipped at the ends of training. Stored in run['final']['test_accuracy_endpoint'], with the chosen epoch in ['endpoint_epoch'].
+
+**Intent.** The accuracy number to compare arms on. Final-epoch accuracy carries seed variance that epoch selection removes, roughly halving it in practice; a window rather than the single best epoch because the validation curve has no sharp optimum, so picking one epoch would be picking noise.
+
+Tracked with no context — one series.
+
 #### `final_test_loss`
 
 **Summary.** Held-out test-set loss at the trained k_rounds, evaluated once after training finishes.
@@ -47,6 +57,16 @@ Tracked with no context — one series.
 **Computation.** Same evaluate() call as final_val_accuracy; the loss component of the same result dict.
 
 **Intent.** Reportable end-of-run number. Also stored in run['final']['val_loss'] for the same cross-run-aggregation reason as final_val_accuracy.
+
+Tracked with no context — one series.
+
+#### `test_accuracy`
+
+**Summary.** Held-out test-set accuracy, evaluated once per epoch.
+
+**Computation.** evaluate() over the full test loader at each epoch boundary in train(), tracked on the epoch axis (step == epoch) alongside val_accuracy.
+
+**Intent.** Per-epoch rather than once at termination so the reported endpoint can be an epoch chosen on *validation* after the fact, rather than wherever training happened to stop. Nothing selects on this series: it is read at epochs validation picked. See final_test_accuracy_endpoint.
 
 Tracked with no context — one series.
 
@@ -114,6 +134,36 @@ Tracked with no context — one series.
 
 Tracked with no context — one series.
 
+#### `inj_rank`
+
+**Summary.** Effective number of distinct spatial patterns in the injection across the batch, averaged over channels and specialists.
+
+**Computation.** Per channel, the residual (b, HW) after removing the spatial mean forms a Gram matrix over the BATCH dimension; the participation ratio (sum l)^2/sum l^2 of its eigenvalues is computed as ||R||_F^4 / ||R R^T||_F^2, no eigendecomposition required. Reported as 0 where inj_resid_frac falls below 1e-6.
+
+**Intent.** Separates a shape conditioned on the message from one fixed shape whose amplitude the message sets. Exactly 1 for a learned input-independent mask, so a transpose-convolution decoder reading 1 has collapsed to that behaviour and has not exercised the access its architecture grants. Bounded above by the batch size, so the ceiling is a property of the measuring batch and not of the architecture.
+
+Tracked with no context — one series.
+
+#### `inj_resid_frac`
+
+**Summary.** Share of the injection's magnitude that varies across spatial positions, averaged over specialists.
+
+**Computation.** ||D - mean_hw D||_F / ||D||_F on the injection tensor (b, C, H, W) captured from each decoder's forward on one fixed validation batch (spatial_diagnostics). Reported as 0 where ||D||_F underflows 1e-12, which is every arm's state at step 0 under the zero-init discipline.
+
+**Intent.** Whether a decoder given spatial access produces a spatially varying perturbation at all. Exactly 0 for a broadcast decoder, at every epoch, which makes it a check on the measurement rather than on that architecture. It is a property of the injection and not of the message: a fixed mask scaled by a scalar reads high here while carrying no spatial information, so read it with inj_rank.
+
+Tracked with no context — one series.
+
+#### `inj_spread`
+
+**Summary.** Share of the injection's magnitude that varies across examples, averaged over specialists.
+
+**Computation.** ||D - mean_b D||_F / ||D||_F, the same construction as inj_resid_frac over the batch axis instead of the spatial axes, on the same fixed validation batch.
+
+**Intent.** Catches a decoder emitting a large but message-independent constant — a learned bias bolted onto a frozen backbone rather than communication. msg_norm's injection part cannot distinguish that from a healthy injection, since both have a healthy norm. Near 0 with inj_rank at 1 means the message is being ignored entirely.
+
+Tracked with no context — one series.
+
 #### `msg_norm`
 
 **Summary.** Mean L2 norm of communication-round tensors, split by pipeline stage.
@@ -129,6 +179,54 @@ Tracked with no context — one series.
 | `value` | what a specialist sends, before aggregation — the raw V output of its QKVEncoder. |
 | `aggregated` | what a specialist receives after attention — the softmax-weighted combination of every sender's value, specific to that receiver's query. |
 | `injection` | what the decoder actually adds back into the backbone, after transforming the aggregated message. A collapse toward zero at 'value' means specialists stopped saying anything meaningful; a collapse only at 'aggregated' means attention is washing messages out in the combination; a collapse only at 'injection' means the decoder itself is suppressing them before they reach the backbone. |
+
+#### `msg_rank_aggregated`
+
+**Summary.** Effective number of independent directions the message a specialist receives varies along, per specialist.
+
+**Computation.** As msg_rank_value, on the bus's output — the attention-weighted combination of every sender's value, specific to that receiver's query.
+
+**Intent.** Varies for two reasons where the sent message varies for one: the senders' messages change with the input, and the attention weights change with the input, so re-weighting contributes variation of its own. Read as a ratio to msg_rank_value.
+
+**Context — `specialist`.** This name covers several series, one per value:
+
+| `specialist` value | meaning |
+|---|---|
+| `0, 1, 2, ...` | position in the resolved backbone list, the same order as the manifest and as the Orchestrator's specialists. Tracked per specialist as well as averaged because one collapsed encoder among n is otherwise diluted into the mean rather than visible: an arm with a single dead sender reads as a mild reduction when the finding is a dead sender. |
+
+#### `msg_rank_ratio`
+
+**Summary.** msg_rank_aggregated_mean divided by msg_rank_value_mean.
+
+**Computation.** The ratio of the two specialist-averaged participation ratios, formed in spatial_diagnostics.
+
+**Intent.** Whether the bus combines senders or echoes one. Above 1 means what arrives spans more directions than any single sender emits; near 1 means what arrives resembles one sender's message. Two conditions are needed for it to rise — the senders must occupy different subspaces, and the aggregation must draw on more than one of them — and the ratio cannot say which is absent, so read it with routing_mode_share, which settles whether attention is pinned.
+
+Tracked with no context — one series.
+
+#### `msg_rank_value`
+
+**Summary.** Effective number of independent directions a specialist's outgoing message varies along, per specialist.
+
+**Computation.** Participation ratio of the Gram of the batch-CENTRED value tensor (b, value_dim) captured from the bus's inputs on one fixed validation batch. msg_rank_value_mean averages over specialists.
+
+**Intent.** How many degrees of freedom the encoder actually exercises, out of value_dim available. Centring is required and not cosmetic: an uncentred constant message dominates the spectrum and would report ~1 for a channel in perfect health. It counts directions used and not information carried, so directions of noise and of signal read alike.
+
+**Context — `specialist`.** This name covers several series, one per value:
+
+| `specialist` value | meaning |
+|---|---|
+| `0, 1, 2, ...` | position in the resolved backbone list, the same order as the manifest and as the Orchestrator's specialists. Tracked per specialist as well as averaged because one collapsed encoder among n is otherwise diluted into the mean rather than visible: an arm with a single dead sender reads as a mild reduction when the finding is a dead sender. |
+
+#### `pool_mask_dev`
+
+**Summary.** Departure of a learned pooling mask from uniform, averaged over channels and specialists.
+
+**Computation.** ||a_c - mean(a_c)|| / ||a_c|| per channel on each PoolReduce's mask parameter, which needs no forward pass. Absent unless the encoders carry such a mask.
+
+**Intent.** Whether an encoder with a learned input-independent mask learned to read anywhere in particular. Mean-removed and therefore scale-invariant: a mask rescaled uniformly still reads 0, because what matters is non-uniformity and not whether the weights moved. Exactly 0 at initialisation; still 0 after training means the arm is its reference arm with spare parameters.
+
+Tracked with no context — one series.
 
 #### `routing_mode_share`
 
@@ -194,24 +292,6 @@ Tracked with no context — one series.
 
 How specialists' predictions/beliefs change on receiving a message.
 
-#### `answer_shift`
-
-**Summary.** How specialists changed their predicted class in response to one communication round, per training batch.
-
-**Computation.** answer_shift_stats(pre, post, y) compares each specialist's pre-round and post-round argmax (captured via Orchestrator.last_shift) against the label, per batch.
-
-**Intent.** corrected-corrupted is communication's realized, per-specialist accuracy value — the thing you actually want positive and growing. agreement_pre/post is a homogenization guard against specialists just converging on each other. See answer_shift_kl for shifts too small to flip an argmax.
-
-**Context — `kind`.** This name covers several series, one per value:
-
-| `kind` value | meaning |
-|---|---|
-| `flip_rate` | fraction of specialists whose predicted class changed at all across the round, regardless of direction. |
-| `corrected` | fraction of specialists wrong before the round, right after. |
-| `corrupted` | fraction of specialists right before the round, wrong after. corrected minus corrupted is the round's net, realized accuracy contribution — the number that answers whether communication is actually helping. |
-| `agreement_pre` | mean pairwise agreement between specialists' predicted classes, before the round. |
-| `agreement_post` | mean pairwise agreement between specialists' predicted classes, after the round. Rising agreement_post without a rising corrected-corrupted gap means specialists are converging on each other's answers, not on the truth — consensus without correctness. |
-
 #### `answer_shift_kl`
 
 **Summary.** Mean KL(post ‖ pre) over specialist output distributions, per training batch.
@@ -221,6 +301,48 @@ How specialists' predictions/beliefs change on receiving a message.
 **Intent.** Catches probability shifts too small to flip an argmax, which answer_shift's flip_rate (and therefore corrected/corrupted) would miss entirely — a flip_rate of 0 doesn't mean communication had zero effect if this is nonzero.
 
 Tracked with no context — one series.
+
+#### `joint_answer_shift`
+
+**Summary.** Correction and corruption of the ensemble's own answer, per training batch.
+
+**Computation.** joint_answer_shift_stats() in ensemble/train.py, on the same pre/post logits answer_shift uses, but aggregated through prob_average() — the readout Orchestrator.forward returns and the loss scores — before the argmax is taken.
+
+**Intent.** The interpretation metric that matches the objective. answer_shift measures whether a member's own argmax moved toward the label, which nothing optimises: the loss is on the prob-averaged ensemble, so one member flipping away from the label is not intrinsically bad and one flipping toward it is not intrinsically good. Read `net` first, since it is the accuracy change itself.
+
+**Context — `kind`.** This name covers several series, one per value:
+
+| `kind` value | meaning |
+|---|---|
+| `pre_accuracy` | accuracy of the prob-averaged ensemble before any message is sent. Every specialist is frozen, so this depends only on the input and the frozen weights: it is the same number in every arm, every seed and every epoch, which is what makes the rates below comparable without normalising for base rate. |
+| `post_accuracy` | the same readout after communication. The pair is the question the per-specialist answer_shift cannot ask: did the channel help the thing being optimised. |
+| `corrected` | fraction of examples the ensemble got wrong before communication and right after. |
+| `corrupted` | fraction it got right before and wrong after. Both rates are over the whole batch, not over the eligible subset, so corrected is bounded by 1 - pre_accuracy and corrupted by pre_accuracy. |
+| `net` | corrected minus corrupted, which is EXACTLY post_accuracy minus pre_accuracy. Communication's effect on ensemble accuracy, decomposed into its two directions — a flat net can be nothing happening or two large offsetting flows, and only the components separate them. |
+| `agreement_pre` | mean pairwise agreement between specialists' predicted classes before the round. A property of the members rather than of the ensemble's answer, kept here because it is the control on net rather than a reading of its own. |
+| `agreement_post` | the same after the round. Rising agreement_post without a rising net means the specialists are converging on each other's answers and not on the truth — consensus without correctness, which raises no accuracy and would otherwise look like successful communication. |
+
+#### `marginal_answer_shift`
+
+**Summary.** Correction and corruption of the ensemble's answer when only one specialist's post-communication opinion is substituted in, per training batch.
+
+**Computation.** joint_answer_shift_stats() replaces row i of the pre-communication logits with row i of the post-communication logits, leaves the others untouched, and re-takes the prob-averaged argmax.
+
+**Intent.** Attributes the joint effect to members. Identifies a specialist whose update alone drags the vote the wrong way, and one whose update carries the gain. Expect small values: with three members and probability averaging, one shifted opinion has to overcome two unchanged ones to move the argmax, so these are not on the same scale as joint_answer_shift and should not be read against it directly.
+
+**Context — `specialist`.** This name covers several series, one per value:
+
+| `specialist` value | meaning |
+|---|---|
+| `0, 1, 2, ...` | position in the resolved backbone list, matching the manifest order and the Orchestrator's specialists. Which member's update is being substituted into an otherwise pre-communication ensemble. |
+
+**Context — `kind`.** This name covers several series, one per value:
+
+| `kind` value | meaning |
+|---|---|
+| `corrected` | fraction of examples the ensemble got wrong before communication and right once ONLY this specialist's post-communication opinion is substituted in. |
+| `corrupted` | the same in the damaging direction. |
+| `net` | corrected minus corrupted for this specialist alone. These do not sum to joint_answer_shift's net: the argmax of a mean of softmaxes is nonlinear in its members, so the gap between the sum and the joint figure is readable in itself — a sum below the joint value means the updates cooperate rather than each moving the vote on its own. |
 
 #### `routed_correct`
 
@@ -238,24 +360,6 @@ Tracked with no context — one series.
 | `corrected` | the subset of those pairs where communication flipped this receiver from wrong to right. If routing is doing the work, this should sit above the 'all' rate — the receiver listened to someone who knew the answer. |
 | `corrupted` | the subset where communication flipped this receiver from right to wrong. Should sit *below* the 'all' rate: the damage should be traceable to having listened to a specialist that was itself wrong. If corrected and corrupted are both at the 'all' rate, routing quality is unrelated to what communication actually did. |
 
-#### `val_answer_shift`
-
-**Summary.** Same quantities as answer_shift, computed over the full validation pass once per epoch instead of per training batch.
-
-**Computation.** answer_shift_stats() applied to pre/post logits captured during the full-val evaluation pass in _evaluate_with_shift(), accumulated (weighted by batch size) across the entire val set.
-
-**Intent.** The lower-variance, epoch-level counterpart to answer_shift — use this to judge communication's value at the end of an epoch rather than reading noisy per-batch swings.
-
-**Context — `kind`.** This name covers several series, one per value:
-
-| `kind` value | meaning |
-|---|---|
-| `flip_rate` | fraction of specialists whose predicted class changed at all across the round, regardless of direction. |
-| `corrected` | fraction of specialists wrong before the round, right after. |
-| `corrupted` | fraction of specialists right before the round, wrong after. corrected minus corrupted is the round's net, realized accuracy contribution — the number that answers whether communication is actually helping. |
-| `agreement_pre` | mean pairwise agreement between specialists' predicted classes, before the round. |
-| `agreement_post` | mean pairwise agreement between specialists' predicted classes, after the round. Rising agreement_post without a rising corrected-corrupted gap means specialists are converging on each other's answers, not on the truth — consensus without correctness. |
-
 #### `val_answer_shift_kl`
 
 **Summary.** Epoch-level counterpart to answer_shift_kl, computed over the full validation pass.
@@ -265,6 +369,48 @@ Tracked with no context — one series.
 **Intent.** Same role as answer_shift_kl — catches sub-argmax-flip shifts — but at the lower-variance, once-per-epoch resolution.
 
 Tracked with no context — one series.
+
+#### `val_joint_answer_shift`
+
+**Summary.** Same quantities as joint_answer_shift, over the full validation pass once per epoch instead of per training batch.
+
+**Computation.** joint_answer_shift_stats() applied in _evaluate_with_shift, accumulated batch-weighted over the whole loader, so the result is the exact per-example rate rather than a mean of per-batch rates.
+
+**Intent.** The lower-variance counterpart, and the one to compare across arms. Its `net` is the change in validation accuracy that communication is responsible for.
+
+**Context — `kind`.** This name covers several series, one per value:
+
+| `kind` value | meaning |
+|---|---|
+| `pre_accuracy` | accuracy of the prob-averaged ensemble before any message is sent. Every specialist is frozen, so this depends only on the input and the frozen weights: it is the same number in every arm, every seed and every epoch, which is what makes the rates below comparable without normalising for base rate. |
+| `post_accuracy` | the same readout after communication. The pair is the question the per-specialist answer_shift cannot ask: did the channel help the thing being optimised. |
+| `corrected` | fraction of examples the ensemble got wrong before communication and right after. |
+| `corrupted` | fraction it got right before and wrong after. Both rates are over the whole batch, not over the eligible subset, so corrected is bounded by 1 - pre_accuracy and corrupted by pre_accuracy. |
+| `net` | corrected minus corrupted, which is EXACTLY post_accuracy minus pre_accuracy. Communication's effect on ensemble accuracy, decomposed into its two directions — a flat net can be nothing happening or two large offsetting flows, and only the components separate them. |
+| `agreement_pre` | mean pairwise agreement between specialists' predicted classes before the round. A property of the members rather than of the ensemble's answer, kept here because it is the control on net rather than a reading of its own. |
+| `agreement_post` | the same after the round. Rising agreement_post without a rising net means the specialists are converging on each other's answers and not on the truth — consensus without correctness, which raises no accuracy and would otherwise look like successful communication. |
+
+#### `val_marginal_answer_shift`
+
+**Summary.** Same quantities as marginal_answer_shift, over the full validation pass once per epoch.
+
+**Computation.** As marginal_answer_shift, inside _evaluate_with_shift, accumulated batch-weighted across the loader.
+
+**Intent.** The lower-variance counterpart, for cross-arm comparison.
+
+**Context — `specialist`.** This name covers several series, one per value:
+
+| `specialist` value | meaning |
+|---|---|
+| `0, 1, 2, ...` | position in the resolved backbone list, matching the manifest order and the Orchestrator's specialists. Which member's update is being substituted into an otherwise pre-communication ensemble. |
+
+**Context — `kind`.** This name covers several series, one per value:
+
+| `kind` value | meaning |
+|---|---|
+| `corrected` | fraction of examples the ensemble got wrong before communication and right once ONLY this specialist's post-communication opinion is substituted in. |
+| `corrupted` | the same in the damaging direction. |
+| `net` | corrected minus corrupted for this specialist alone. These do not sum to joint_answer_shift's net: the argmax of a mean of softmaxes is nonlinear in its members, so the gap between the sum and the joint figure is readable in itself — a sum below the joint value means the updates cooperate rather than each moving the vote on its own. |
 
 #### `val_routed_correct`
 
@@ -302,9 +448,12 @@ Whether optimization itself is healthy — orthogonal to whether communication h
 | `query_head` | the receiver projection in a specialist's QKVEncoder. Only receives gradient through the attention softmax, so it's the earliest warning if attention saturates and stops passing gradient back. |
 | `key_head` | the signature projection in a specialist's QKVEncoder. Same softmax-only gradient path as query_head — the two are the first components to go quiet. |
 | `value_head` | the sender projection in a specialist's QKVEncoder — what gets broadcast as a message. |
+| `reduce` | the encoder's spatial front-end — how the read port's (C, H, W) activation becomes the vector the trunk and heads consume. A plain spatial mean has no parameters, so this series appears only for encoders whose reduction is learned. |
+| `expand` | the decoder's spatial back-end — how a per-channel vector becomes the (C, H, W) map added at the write port. A plain broadcast has no parameters, so this series appears only for decoders whose expansion is learned. |
 | `decoder` | the MLP that turns an aggregated message into an injection back into the backbone. |
 | `fc` | the backbone's own classification head — the one part of the otherwise-frozen backbone left trainable. |
 | `trunk` | the shared MLP trunk before it diverges into query/key/value heads. Present for --encoder mlp (Linear->GELU->LayerNorm) and --encoder mlp_no_ln (Linear->GELU, no LayerNorm) — not for qkv, which has no shared trunk at all. |
+| `other` | trainable parameters matching no component token. Normally absent; if it appears, a submodule was added without a matching entry in _GRAD_COMPONENTS and its gradients are landing here rather than under a name. Catching that is the point — before this bucket existed they were dropped from every per-component series with no sign anything was missing. |
 
 #### `layernorm_param_norm`
 
@@ -337,9 +486,12 @@ Whether optimization itself is healthy — orthogonal to whether communication h
 | `query_head` | the receiver projection in a specialist's QKVEncoder. Only receives gradient through the attention softmax, so it's the earliest warning if attention saturates and stops passing gradient back. |
 | `key_head` | the signature projection in a specialist's QKVEncoder. Same softmax-only gradient path as query_head — the two are the first components to go quiet. |
 | `value_head` | the sender projection in a specialist's QKVEncoder — what gets broadcast as a message. |
+| `reduce` | the encoder's spatial front-end — how the read port's (C, H, W) activation becomes the vector the trunk and heads consume. A plain spatial mean has no parameters, so this series appears only for encoders whose reduction is learned. |
+| `expand` | the decoder's spatial back-end — how a per-channel vector becomes the (C, H, W) map added at the write port. A plain broadcast has no parameters, so this series appears only for decoders whose expansion is learned. |
 | `decoder` | the MLP that turns an aggregated message into an injection back into the backbone. |
 | `fc` | the backbone's own classification head — the one part of the otherwise-frozen backbone left trainable. |
 | `trunk` | the shared MLP trunk before it diverges into query/key/value heads. Present for --encoder mlp (Linear->GELU->LayerNorm) and --encoder mlp_no_ln (Linear->GELU, no LayerNorm) — not for qkv, which has no shared trunk at all. |
+| `other` | trainable parameters matching no component token. Normally absent; if it appears, a submodule was added without a matching entry in _GRAD_COMPONENTS and its gradients are landing here rather than under a name. Catching that is the point — before this bucket existed they were dropped from every per-component series with no sign anything was missing. |
 
 ## Replicate-group summary metrics
 

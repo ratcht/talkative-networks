@@ -11,6 +11,20 @@ from ensemble.communicative.hooks import hook_encoder, hook_decoder, HookState
 
 from typing import Annotated
 
+def prob_average(logits: t.Tensor) -> t.Tensor:
+  """log( mean_i softmax(logits_i) ) over the member axis of (n, b, c) logits.
+
+  A logsumexp over per-member log-probs, for numerical stability. Returns
+  LOG-PROBABILITIES, not logits — pair with NLLLoss, never CrossEntropyLoss.
+
+  This is the ensemble's decision: what Orchestrator.forward returns, what the
+  loss scores, and what evaluate() reports. Any metric that claims to be about
+  the ensemble's answer rather than one member's has to aggregate the same way,
+  which is why this is a function and not inlined in forward.
+  """
+  return t.logsumexp(F.log_softmax(logits, dim=-1), dim=0) - math.log(logits.shape[0])
+
+
 class Specialist(nn.Module):
   def __init__(self, driver: Driver, decoder: Decoder, encoder: QKVEncoder):
     super().__init__()
@@ -113,8 +127,11 @@ class Orchestrator(nn.Module):
           self.last_stats = {
             "value": V.norm(dim=-1).mean().item(),
             "aggregated": c.norm(dim=-1).mean().item(),
+            # measured as added: a broadcast decoder emits (b, c, 1, 1), and
+            # its unexpanded norm reads sqrt(H*W) below the map it injects
             "injection": t.stack([
-              decoder_outs[i].value.flatten(1).norm(dim=1).mean() for i in range(n)
+              decoder_outs[i].value.expand(decoder_outs[i].target_shape)
+              .flatten(1).norm(dim=1).mean() for i in range(n)
             ]).mean().item(),
           }
           # per-row (per-receiver) entropy of the attention distribution over
@@ -131,10 +148,4 @@ class Orchestrator(nn.Module):
     if pre_logits is not None:
       self.last_shift = {"pre": pre_logits, "post": outputs.detach()}
 
-    # prob-averaged readout: log( mean_i softmax(logits_i) ), computed as a
-    # logsumexp over per-member log-probs for numerical stability. Returns
-    # LOG-PROBABILITIES, not logits — pair with NLLLoss, never CrossEntropyLoss
-    log_probs: Annotated[t.Tensor, "b c"] = (
-      t.logsumexp(F.log_softmax(outputs, dim=-1), dim=0) - math.log(n)
-    )
-    return log_probs
+    return prob_average(outputs)

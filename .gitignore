@@ -3,3 +3,8 @@
 **/__pycache__/**
 data/**
 site/**
+# local run bookkeeping, not results: per-seed resume state, run logs, and
+# snapshots moved aside before a re-run
+scripts/replicate_state/**
+logs/**
+archive/**

@@ -21,9 +21,9 @@ import argparse
 import json
 import random
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -41,7 +41,12 @@ sys.path.insert(0, str(_REPO_ROOT))
 from backbone.resnet import ResNet
 from ensemble.communicative.driver import Driver
 from ensemble.communicative.bus import QKVEncoder, MLPEncoder, MLPNoLNEncoder, Decoder
-from ensemble.communicative.orchestrator import Specialist, Orchestrator
+from ensemble.communicative.diagnostics import spatial_diagnostics
+from ensemble.communicative.spatial import (
+  Shape, gap_reduce, PoolReduce, ConvReduce, FlatReduce,
+  broadcast_expand, MaskExpand, ConvTDecoder,
+)
+from ensemble.communicative.orchestrator import Specialist, Orchestrator, prob_average
 from ensemble.eval import evaluate
 from ensemble import metric_docs
 
@@ -86,33 +91,51 @@ class TrainJob:
   config: TrainConfig
   run: Optional[Run] = None
   val_loader: Optional[DataLoader] = None  # if set, evaluated + tracked every epoch
+  # if set, test accuracy is tracked every epoch rather than once at the end,
+  # which is what lets the endpoint be chosen on validation after the fact
+  # (docs/studies/02-spatial-ports.md §4.3) instead of taken at termination
+  test_loader: Optional[DataLoader] = None
+  # one fixed validation batch, the same batch every epoch and in every arm, on
+  # which §5.2's spatial diagnostics are computed
+  diag_batch: Optional[torch.Tensor] = None
+  # per-epoch accuracies, filled by train(); the endpoint is computed from
+  # these rather than re-read from Aim, whose index is not refreshed in-process
+  epoch_history: dict[str, list[float]] = field(default_factory=dict)
 
 
 # trainable components of the orchestrator, matched against parameter name
 # tokens; query/key norms are the early warning for vanishing gradients since
-# they only receive gradient through the attention softmax
-_GRAD_COMPONENTS = ("query_head", "key_head", "value_head", "decoder", "fc", "trunk")
+# they only receive gradient through the attention softmax.
+#
+# First hit wins, so a more specific token must precede the broader one it sits
+# inside: "expand" before "decoder", since a spatially-structured decoder keeps
+# its mask at decoder.expand.mask and would otherwise be lumped in with the MLP.
+_GRAD_COMPONENTS = ("reduce", "expand", "query_head", "key_head", "value_head",
+                    "decoder", "fc", "trunk")
+# Trainable parameters matching no token land here instead of vanishing. Before
+# this existed, adding a submodule under a name no token covered (an encoder's
+# learned reduce, say) dropped it from every per-component series silently — it
+# still counted toward total, so nothing looked wrong.
+_GRAD_OTHER = "other"
 
 
-def _component_of(param_name: str) -> Optional[str]:
+def _component_of(param_name: str) -> str:
   tokens = param_name.split(".")
   for c in _GRAD_COMPONENTS:
     if c in tokens:
       return c
-  return None
+  return _GRAD_OTHER
 
 
 def grad_norms(model: nn.Module) -> dict[str, float]:
   """L2 norm of the gradients, total and per component."""
-  groups: dict[str, list] = {c: [] for c in _GRAD_COMPONENTS}
+  groups: dict[str, list] = {c: [] for c in (*_GRAD_COMPONENTS, _GRAD_OTHER)}
   everything = []
   for name, p in model.named_parameters():
     if p.grad is None:
       continue
     everything.append(p)
-    c = _component_of(name)
-    if c is not None:
-      groups[c].append(p)
+    groups[_component_of(name)].append(p)
 
   def norm(params) -> float:
     if not params:
@@ -139,9 +162,8 @@ def update_to_weight_ratios(model: nn.Module, before: dict[str, torch.Tensor]) -
     d = (p.detach() - old).pow(2).sum().item()
     w = old.pow(2).sum().item()
     for key in ("total", _component_of(name)):
-      if key is not None:
-        num[key] = num.get(key, 0.0) + d
-        den[key] = den.get(key, 0.0) + w
+      num[key] = num.get(key, 0.0) + d
+      den[key] = den.get(key, 0.0) + w
   return {k: num[k] ** 0.5 / max(den[k] ** 0.5, 1e-12) for k in num}
 
 
@@ -170,37 +192,77 @@ def layernorm_param_norms(model: nn.Module) -> dict[str, float]:
   return out
 
 
-def answer_shift_stats(pre: torch.Tensor, post: torch.Tensor, y: torch.Tensor) -> dict[str, float]:
-  """How specialists changed their answers in response to messages.
+def answer_shift_stats(
+  pre: torch.Tensor, post: torch.Tensor, y: torch.Tensor
+) -> dict[str, float]:
+  """How communication changed the ENSEMBLE's answer, and at whose hand.
 
   pre/post: (n_specialists, batch, classes) logits from before/after
   communication (Orchestrator.last_shift); y: (batch,) labels.
 
-  corrected/corrupted are the flips split by direction — their gap is the per-
-  specialist accuracy value of communication. kl catches probability shifts too
-  small to flip the argmax. agreement_pre/post guard against homogenization:
-  post-agreement rising without corrected − corrupted rising means the
-  specialists converge on each other rather than on the truth.
+  Everything here is read through prob_average(), the prob-averaged readout
+  Orchestrator.forward returns and the loss scores. Per-specialist correction
+  and corruption rates used to be reported instead, and were dropped: the
+  objective is the ensemble's answer, so one member flipping away from the
+  label is not intrinsically bad and one flipping toward it is not
+  intrinsically good, and averaging those flips over members measures nothing
+  anyone optimises.
+
+  Two properties follow from reading the joint answer instead. `joint:net` is
+  corrected minus corrupted, which is *exactly* the change in ensemble accuracy
+  caused by communication, so a flat accuracy reading decomposes into either
+  nothing happening or two large offsetting flows. And because every specialist
+  is frozen, `pre` depends only on the input and the frozen weights, so the
+  examples eligible for correction are the same set in every arm, every seed and
+  every epoch.
+
+  The `marginal:<i>:` keys substitute specialist i's post-communication logits
+  into an otherwise pre-communication ensemble, leaving the others untouched:
+  what this member's update contributes to the joint decision on its own. They
+  do not sum to `joint:net`, the argmax of a mean of softmaxes being nonlinear
+  in its members, and the gap is readable in itself — a sum below the joint
+  figure means the updates cooperate rather than each moving the vote alone.
+
+  agreement_pre/post are pairwise argmax agreement between members, kept
+  because they are the control on `joint:net`: agreement rising without net
+  rising is consensus without correctness. kl is the mean per-specialist
+  divergence from pre to post, which catches probability movement too small to
+  flip any argmax.
+
+  Keys are namespaced with ':' so _track_answer_shift can route them to their
+  own metric names and contexts.
   """
-  pre_ans = pre.argmax(-1)    # (n, b)
-  post_ans = post.argmax(-1)
-  right_pre = pre_ans == y
-  right_post = post_ans == y
+  right_pre = prob_average(pre).argmax(-1) == y
+  right_post = prob_average(post).argmax(-1) == y
 
-  kl = (post.softmax(-1) * (F.log_softmax(post, -1) - F.log_softmax(pre, -1))).sum(-1)
-
+  corrected = (~right_pre & right_post).float().mean().item()
+  corrupted = (right_pre & ~right_post).float().mean().item()
   out = {
-    "flip_rate": (pre_ans != post_ans).float().mean().item(),
-    "corrected": (~right_pre & right_post).float().mean().item(),
-    "corrupted": (right_pre & ~right_post).float().mean().item(),
-    "kl": kl.mean().item(),
+    "joint:pre_accuracy": right_pre.float().mean().item(),
+    "joint:post_accuracy": right_post.float().mean().item(),
+    "joint:corrected": corrected,
+    "joint:corrupted": corrupted,
+    "joint:net": corrected - corrupted,
+    "kl": (post.softmax(-1) * (F.log_softmax(post, -1)
+                               - F.log_softmax(pre, -1))).sum(-1).mean().item(),
   }
 
+  for i in range(pre.shape[0]):
+    mixed = pre.clone()
+    mixed[i] = post[i]
+    right_mixed = prob_average(mixed).argmax(-1) == y
+    c = (~right_pre & right_mixed).float().mean().item()
+    x = (right_pre & ~right_mixed).float().mean().item()
+    out[f"marginal:{i}:corrected"] = c
+    out[f"marginal:{i}:corrupted"] = x
+    out[f"marginal:{i}:net"] = c - x
+
+  pre_ans, post_ans = pre.argmax(-1), post.argmax(-1)
   pairs = [(i, j) for i in range(pre.shape[0]) for j in range(i + 1, pre.shape[0])]
   if pairs:
-    out["agreement_pre"] = torch.stack(
+    out["joint:agreement_pre"] = torch.stack(
       [(pre_ans[i] == pre_ans[j]).float().mean() for i, j in pairs]).mean().item()
-    out["agreement_post"] = torch.stack(
+    out["joint:agreement_post"] = torch.stack(
       [(post_ans[i] == post_ans[j]).float().mean() for i, j in pairs]).mean().item()
   return out
 
@@ -350,13 +412,25 @@ def _track_routing(run: Run, counts: dict[str, tuple[int, int]], prefix: str,
 
 
 def _track_answer_shift(run: Run, stats: dict[str, float], prefix: str, step: int, epoch: int) -> None:
-  # kl is unbounded while the other kinds live in [0, 1] — give it its own
-  # metric name so it never shares a y-axis with the rates
-  for kind, v in stats.items():
-    if kind == "kl":
-      run.track(v, name=f"{prefix}_kl", step=step, epoch=epoch)
-    else:
-      run.track(v, name=prefix, step=step, epoch=epoch, context={"kind": kind})
+  """Route answer_shift_stats' namespaced keys to their own metric names.
+
+  prefix is "answer_shift" for the training-set series and "val_answer_shift"
+  for the validation ones; the base ("" or "val_") is what varies.
+  """
+  base = prefix.removesuffix("answer_shift")
+  for key, v in stats.items():
+    if key == "kl":
+      # unbounded, where every other value lives in [0, 1] — its own metric
+      # name so it never shares a y-axis with the rates
+      run.track(v, name=f"{base}answer_shift_kl", step=step, epoch=epoch)
+      continue
+    parts = key.split(":")
+    if parts[0] == "joint":
+      run.track(v, name=f"{base}joint_answer_shift", step=step, epoch=epoch,
+                context={"kind": parts[1]})
+    elif parts[0] == "marginal":
+      run.track(v, name=f"{base}marginal_answer_shift", step=step, epoch=epoch,
+                context={"specialist": int(parts[1]), "kind": parts[2]})
 
 
 @torch.no_grad()
@@ -432,6 +506,12 @@ def train(job: TrainJob, *args, **kwargs) -> list[float]:
   try:
     for epoch in range(cfg.epochs):
       correct = seen = 0
+      # answer-shift accumulates across the epoch and is tracked once at its
+      # end, batch-weighted: the same treatment train_accuracy gets, and what
+      # makes the training and validation figures comparable quantities rather
+      # than a per-step series against a per-epoch one
+      shift_acc: dict[str, float] = {}
+      shift_seen = 0
       for x, y in job.loader:
         x, y = x.to(cfg.device), y.to(cfg.device)
         job.optimizer.zero_grad()
@@ -486,8 +566,9 @@ def train(job: TrainJob, *args, **kwargs) -> list[float]:
           # how specialists changed their answers in response to messages
           shift = getattr(job.model, "last_shift", None)
           if shift is not None:
-            _track_answer_shift(job.run, answer_shift_stats(shift["pre"], shift["post"], y),
-                                "answer_shift", step, epoch)
+            for k, v in answer_shift_stats(shift["pre"], shift["post"], y).items():
+              shift_acc[k] = shift_acc.get(k, 0.0) + v * y.size(0)
+            shift_seen += y.size(0)
             # whether attention concentrated on a specialist that was actually
             # right — needs both the attention and the pre/post opinions
             if attn is not None:
@@ -512,6 +593,9 @@ def train(job: TrainJob, *args, **kwargs) -> list[float]:
       epoch_line = f"epoch {epoch + 1}/{cfg.epochs}  train_accuracy {train_acc:.4f}"
       if job.run is not None:
         job.run.track(train_acc, name="train_accuracy", step=epoch, epoch=epoch)
+        if shift_seen:
+          _track_answer_shift(job.run, {k: v / shift_seen for k, v in shift_acc.items()},
+                              "answer_shift", epoch, epoch)
       if job.val_loader is not None:
         val, val_shift, val_routing = _evaluate_with_shift(
           job.model, job.val_loader, cfg.device, job.criterion, **kwargs)
@@ -523,6 +607,7 @@ def train(job: TrainJob, *args, **kwargs) -> list[float]:
           if val_routing.routes is not None else None
         if val_routing.routes is not None:
           prev_routes = val_routing.routes
+        job.epoch_history.setdefault("val_accuracy", []).append(val["accuracy"])
         if job.run is not None:
           job.run.track(val["accuracy"], name="val_accuracy", step=epoch, epoch=epoch)
           _track_answer_shift(job.run, val_shift, "val_answer_shift", epoch, epoch)
@@ -533,6 +618,29 @@ def train(job: TrainJob, *args, **kwargs) -> list[float]:
           if flips is not None:
             job.run.track(flips, name="val_route_flip_rate", step=epoch, epoch=epoch)
         epoch_line += "  " + "  ".join(f"val_{k} {v:.4f}" for k, v in val.items())
+
+      # test accuracy per epoch, so §4.3's endpoint can average over a window
+      # around the validation-selected epoch. Selection never consults this.
+      if job.test_loader is not None and job.run is not None:
+        test = evaluate(job.model, job.test_loader, device=cfg.device,
+                        criterion=job.criterion, **kwargs)
+        job.model.train()
+        job.run.track(test["accuracy"], name="test_accuracy", step=epoch, epoch=epoch)
+        job.epoch_history.setdefault("test_accuracy", []).append(test["accuracy"])
+        epoch_line += f"  test_accuracy {test['accuracy']:.4f}"
+
+      # whether the adapters used the spatial access their level grants them
+      if job.diag_batch is not None and job.run is not None:
+        diag = spatial_diagnostics(job.model, job.diag_batch, cfg.device,
+                                   kwargs.get("k_rounds", 0))
+        job.model.train()
+        for name, value in diag.items():
+          if isinstance(value, list):
+            for i, v in enumerate(value):
+              job.run.track(v, name=name, step=epoch, epoch=epoch,
+                            context={"specialist": i})
+          else:
+            job.run.track(value, name=name, step=epoch, epoch=epoch)
       pbar.write(epoch_line)
   except KeyboardInterrupt:
     print(f"interrupted at step {step}")
@@ -612,11 +720,40 @@ class SpecialistSpec:
   decoder: str = "mlp"
 
 
-# Swappable head implementations, keyed by the name SpecialistSpec.encoder /
-# .decoder refers to. Additive only: a new head architecture is added by
-# registering a class here, never by editing build_communicative.
-ENCODERS: dict[str, type] = {"qkv": QKVEncoder, "mlp": MLPEncoder, "mlp_no_ln": MLPNoLNEncoder}
-DECODERS: dict[str, type] = {"mlp": Decoder}
+# Swappable adapters, keyed by the name SpecialistSpec.encoder / .decoder
+# refers to. Additive only: a new architecture is added by registering a
+# factory here, never by editing build_communicative.
+#
+# An encoder name selects a trunk *and* a spatial mapping at the read port,
+# since Study 02's encoder levels are one trunk with four different mappings
+# (docs/studies/02-spatial-ports.md §3.2). The pre-Study-02 names are kept as
+# aliases of the mapping they always had, so checkpoints written before the
+# rename still load.
+ENCODERS: dict[str, tuple[type, Callable[[Shape], nn.Module]]] = {
+  "gap": (MLPEncoder, gap_reduce),         # E1 — no spatial access
+  "pool": (MLPEncoder, PoolReduce),        # E2 — input-independent mask
+  "conv": (MLPEncoder, ConvReduce),        # E3 — convolutional prior
+  "flat": (MLPEncoder, FlatReduce),        # E4 — locality prior only
+  "qkv": (QKVEncoder, gap_reduce),
+  "mlp": (MLPEncoder, gap_reduce),         # == "gap"
+  "mlp_no_ln": (MLPNoLNEncoder, gap_reduce),
+}
+
+# A decoder factory takes (value_dim, write-port shape). D1 and D2 share the
+# Decoder class and differ only in their expand; D3 replaces it outright,
+# its dense stage emitting a spatial grid rather than one value per channel.
+def _decoder(expand: Callable[[Shape], nn.Module]) -> Callable[[int, Shape], nn.Module]:
+  def make(value_dim: int, shape: Shape) -> nn.Module:
+    return Decoder(value_dim, shape[0], expand(shape))
+  return make
+
+
+DECODERS: dict[str, Callable[[int, Shape], nn.Module]] = {
+  "broadcast": _decoder(broadcast_expand),  # D1 — uniform per-channel bias
+  "mask": _decoder(MaskExpand),             # D2 — input-independent shape
+  "convt": ConvTDecoder,                    # D3 — message-conditioned shape
+  "mlp": _decoder(broadcast_expand),        # == "broadcast"
+}
 
 
 def resolve_specialist_specs(
@@ -650,8 +787,16 @@ def resolve_specialist_specs(
 
 
 @torch.no_grad()
-def _adapter_dims(backbone: nn.Module, early: str, late: str, device: str) -> tuple[int, int]:
-  """Channel widths the decoder injects into / the encoder reads from."""
+def _adapter_dims(
+  backbone: nn.Module, early: str, late: str, device: str
+) -> tuple[Shape, Shape]:
+  """(C, H, W) of the tensor the decoder injects into / the encoder reads from.
+
+  Spatial extent and not just channel width, since Study 02's adapters are
+  sized against it: a learned mask spans H*W entries, a convolutional stack's
+  flatten depends on it, and a transpose-convolution stack needs to know how
+  many doublings reach the port.
+  """
   shapes = {}
   h_early = backbone.get_submodule(early).register_forward_pre_hook(
     lambda m, inp: shapes.__setitem__("early_in", inp[0].shape)
@@ -662,7 +807,7 @@ def _adapter_dims(backbone: nn.Module, early: str, late: str, device: str) -> tu
   backbone(torch.zeros(1, 3, 32, 32, device=device))
   h_early.remove()
   h_late.remove()
-  return shapes["early_in"][1], shapes["late_out"][1]
+  return tuple(shapes["early_in"][1:]), tuple(shapes["late_out"][1:])
 
 
 def build_communicative(
@@ -672,20 +817,18 @@ def build_communicative(
   num_classes: int,
   device: str,
 ) -> Orchestrator:
-  from einops.layers.torch import Reduce, Rearrange
-
   specialists = []
   for spec in specs:
     model = _load_backbone(spec.backbone_path, device)
     # per-spec, not once from specialists[0]: early/late can now differ per
     # specialist, so each one's own adapter dims must be measured separately
-    early_ch, late_ch = _adapter_dims(model, spec.early, spec.late, device)
-    decoder_cls = DECODERS[spec.decoder]
-    encoder_cls = ENCODERS[spec.encoder]
+    early_shape, late_shape = _adapter_dims(model, spec.early, spec.late, device)
+    decoder_factory = DECODERS[spec.decoder]
+    encoder_cls, reduce_factory = ENCODERS[spec.encoder]
     specialists.append(Specialist(
       Driver(model, spec.early, spec.late),
-      decoder_cls(value_dim, early_ch, Rearrange("b c -> b c 1 1")),
-      encoder_cls(late_ch, key_dim, value_dim, Reduce("b c h w -> b c", "mean")),
+      decoder_factory(value_dim, early_shape),
+      encoder_cls(late_shape[0], key_dim, value_dim, reduce_factory(late_shape)),
     ))
   return Orchestrator(specialists, key_dim, value_dim, num_classes).to(device)
 
@@ -703,7 +846,33 @@ def _resolve_backbone_paths(manifest: Optional[Path], backbones: Optional[list[P
 # Aggregation across seed replicates
 # ---------------------------------------------------------------------------
 
-_SUMMARY_METRICS = ("val_accuracy", "val_loss", "test_accuracy", "test_loss")
+_SUMMARY_METRICS = ("val_accuracy", "val_loss", "test_accuracy", "test_loss",
+                    "test_accuracy_endpoint")
+
+# docs/studies/02-spatial-ports.md §4.3: the accuracy endpoint is test accuracy
+# averaged over a window centred on the best validation epoch, not the value at
+# termination. Study 01's best validation epoch ranged from 0 to 36 of 70, so
+# the window runs off the start of a run in practice and is clipped.
+ENDPOINT_WINDOW = 5
+
+
+def windowed_endpoint(
+  val_acc: list[float], test_acc: list[float], width: int = ENDPOINT_WINDOW
+) -> tuple[float, int]:
+  """(mean test accuracy over the window, the validation-selected epoch).
+
+  Selecting a single epoch would be selecting on noise: the validation curve
+  has no sharp optimum, so the window averages away the part of the choice that
+  is arbitrary while keeping the part that is not. Test accuracy is read at the
+  chosen epochs and never consulted in choosing them.
+  """
+  if not val_acc or not test_acc:
+    raise ValueError("endpoint needs per-epoch val and test accuracy")
+  best = max(range(len(val_acc)), key=lambda i: val_acc[i])
+  half = width // 2
+  lo, hi = max(0, best - half), min(len(test_acc), best + half + 1)
+  window = test_acc[lo:hi]
+  return sum(window) / len(window), best
 
 
 def summarize_replicates(experiment: str, seeds: list[int], repo: Optional[str] = None) -> Run:
@@ -860,9 +1029,15 @@ def main() -> None:
     (p for p in orchestrator.parameters() if p.requires_grad),
     lr=cfg.lr, weight_decay=cfg.weight_decay,
   )
+  # the same batch every epoch and in every arm: these statistics are partly a
+  # property of the batch they are measured on, so a fixed one is what makes
+  # them comparable along training and across the grid (§5.2)
+  diag_batch, _ = next(iter(val_loader))
+
   job = TrainJob(
     model=orchestrator, loader=train_loader, optimizer=optimizer,
     criterion=criterion, config=cfg, run=run, val_loader=val_loader,
+    test_loader=test_loader, diag_batch=diag_batch,
   )
   train(job, k_rounds=args.k_rounds)
 
@@ -881,14 +1056,30 @@ def main() -> None:
   # plain run param (not just .track()'d) so summarize_replicates can read it
   # back with a dict lookup instead of a metric-sequence query
   final_flat = {f"{name}_{k}": v for name, res in results.items() for k, v in res.items()}
+
+  history = job.epoch_history
+  if history.get("val_accuracy") and history.get("test_accuracy"):
+    endpoint, best_epoch = windowed_endpoint(
+      history["val_accuracy"], history["test_accuracy"])
+    final_flat["test_accuracy_endpoint"] = endpoint
+    final_flat["endpoint_epoch"] = best_epoch
+    print(f"endpoint: test_accuracy {endpoint:.4f} "
+          f"over {ENDPOINT_WINDOW} epochs centred on epoch {best_epoch + 1}")
+    if run is not None:
+      run.track(endpoint, name="final_test_accuracy_endpoint")
+      run.track(best_epoch, name="final_endpoint_epoch")
+
   if run is not None:
     run["final"] = final_flat
 
   # architecture + seed are in the name, not just the backbones: every arm of an
-  # encoder study shares one fixed expert group, so a backbone-only name makes
-  # every arm and every seed collide on one path and silently overwrite
+  # architecture study shares one fixed expert group, so a backbone-only name
+  # makes every arm and every seed collide on one path and silently overwrite.
+  # BOTH adapters belong here — with the encoder alone, two arms differing only
+  # in --decoder overwrite each other seed for seed.
   stems = "_".join(p.stem for p in backbone_paths)
-  arch = f"{args.encoder}_k{args.key_dim}_v{args.value_dim}_r{args.k_rounds}"
+  arch = (f"{args.encoder}_{args.decoder}"
+          f"_k{args.key_dim}_v{args.value_dim}_r{args.k_rounds}")
   out = args.output_dir / f"communicative_{stems}_{arch}_seed{args.seed}.pt"
   out.parent.mkdir(parents=True, exist_ok=True)
   torch.save({
