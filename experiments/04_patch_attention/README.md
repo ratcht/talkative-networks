@@ -131,7 +131,7 @@ Decoders: linear = one `nn.Linear`. MLP = the current `Linear → GELU → Linea
 ## Training setup (from experiment 03)
 
 - Experts: `selection/manifests/encoder_study_group.json`
-- Encoder `qkv`, `key_dim 16`, taps `layer1.2` / `layer3.0`, K = 1
+- Encoder `qkv_eye`, `key_dim 16`, taps `layer1.2` / `layer3.0`, K = 1
 - Backbones frozen, `--freeze-fc`, `--patience 10`, 70 epochs max
 - AdamW lr 1e-3, weight decay 1e-4
 - Seeds: 476981973, 621715752, 1882162633

@@ -2,10 +2,10 @@
 
 Run from the repo root.
 
-## 1. Start tmux
+## 1. Start screen
 
 ```bash
-tmux new -s pattn
+screen -S pattn
 ```
 
 ## 2. Run all 18 arms
@@ -14,10 +14,10 @@ tmux new -s pattn
 systemd-inhibit --what=sleep:idle --why="patch attention" bash -c 'for a in p0_linear_add p0_mlp_add p1_linear_add_pattn p1_linear_replace_pattn p1_mlp_add_pattn p1_mlp_replace_pattn p1_linear_add p1_linear_replace p1_mlp_add p1_mlp_replace p2_linear_add_pattn p2_linear_replace_pattn p2_mlp_add_pattn p2_mlp_replace_pattn p2_linear_add p2_linear_replace p2_mlp_add p2_mlp_replace; do bash experiments/04_patch_attention/run.sh $a || exit 1; done'
 ```
 
-Detach: `Ctrl-b` then `d`. Reattach:
+Detach: `Ctrl-a` then `d`. Reattach:
 
 ```bash
-tmux attach -t pattn
+screen -r pattn
 ```
 
 ## If it gets interrupted
