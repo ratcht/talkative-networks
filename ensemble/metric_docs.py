@@ -67,6 +67,8 @@ _COMPONENT = ContextKey(
   name="component",
   values={
     "total": "every trainable parameter combined.",
+    "patch_attn": "a specialist's attention across its own patches after the "
+                  "bus (--patch-attn), all of its query/key/value weights.",
     "query_head": "the receiver projection in a specialist's QKVEncoder. Only "
                   "receives gradient through the attention softmax, so it's "
                   "the earliest warning if attention saturates and stops "
@@ -76,8 +78,8 @@ _COMPONENT = ContextKey(
                 "first components to go quiet.",
     "value_head": "the sender projection in a specialist's QKVEncoder — what "
                   "gets broadcast as a message.",
-    "decoder": "the MLP that turns an aggregated message into an injection "
-               "back into the backbone.",
+    "decoder": "the network (--decoder mlp or linear) that turns an "
+               "aggregated message into an injection back into the backbone.",
     "fc": "the backbone's own classification head — the one part of the "
           "otherwise-frozen backbone left trainable.",
     "trunk": "the shared MLP trunk before it diverges into query/key/value "
@@ -267,6 +269,19 @@ _DOCS: tuple[MetricDoc, ...] = (
            "log(n) (uniform attention) means every receiver is just "
            "averaging all senders equally, which — combined with a flat "
            "msg_norm — would suggest attention isn't discriminating at all.",
+    category="communication_content",
+  ),
+  MetricDoc(
+    name="patch_attn_entropy",
+    summary="Mean per-row entropy of each specialist's attention across its "
+            "own patches (--patch-attn), averaged over specialists, patches "
+            "and the batch.",
+    computation="-(attn * attn.log()).sum(-1) on PatchAttention's (b, p, p) "
+                "post-softmax attn inside Orchestrator.forward, stacked over "
+                "specialists and meaned to one scalar per step.",
+    intent="Whether patches mix at all. Near log(p) means each patch takes a "
+           "flat average over all patches, so the spatial layout is washed "
+           "out; low means each patch reads from a few others.",
     category="communication_content",
   ),
   MetricDoc(
@@ -476,7 +491,7 @@ _DOCS: tuple[MetricDoc, ...] = (
            "fix with key/query normalization or score scaling). Same endpoint, "
            "opposite remedies, and only the trajectory distinguishes them: "
            "high-then-decaying is the first, flat at ~0 from epoch 1 is the "
-           "second. Note the Decoder's output layer is zero-initialized, so "
+           "second. Note the Decoder's output layer is zero-initialized (except --inject replace), so "
            "the injected message starts at exactly zero and attention gets no "
            "learning signal for the first steps — the second story is live. "
            "Reference points for k=3: 0.0 is identical to last epoch, 0.667 is "

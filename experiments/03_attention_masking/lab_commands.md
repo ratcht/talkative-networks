@@ -109,7 +109,7 @@ export CUDA_VISIBLE_DEVICES=1
 ```
 
 ```bash
-uv run python ensemble/train.py communicative --manifest selection/manifests/encoder_study_group.json --freeze-fc --decoder film --attn others --unfreeze layer1.2 layer1.3 layer1.4 --epochs 1 --no-track --experiment smoke && rm -r ensemble/checkpoints/smoke
+uv run python ensemble/train.py communicative --manifest selection/manifests/encoder_study_group.json --freeze-fc --decoder mlp --inject film --attn others --unfreeze layer1.2 layer1.3 layer1.4 --epochs 1 --no-track --experiment smoke && rm -r ensemble/checkpoints/smoke
 ```
 
 Expect `trainable params=79,488`.

@@ -61,30 +61,34 @@ class MLPNoLNEncoder(nn.Module):
     return self.query_head(f), self.key_head(f), self.value_head(f)
 
 
+class EyeQKVEncoder(QKVEncoder):
+  """QKVEncoder with the value map initialized to identity."""
+  def __init__(self, in_dim: int, key_dim: int, value_dim: int, reduce: nn.Module):
+    assert value_dim == in_dim, f"identity value needs value_dim == in_dim ({value_dim} != {in_dim})"
+    super().__init__(in_dim, key_dim, value_dim, reduce)
+    nn.init.eye_(self.value_head.weight)
+    nn.init.zeros_(self.value_head.bias)
+
+
 class Decoder(nn.Module):
-  def __init__(self, value_dim: int, out_dim: int, expand: nn.Module):
+  def __init__(self, value_dim: int, out_dim: int, expand: nn.Module,
+               hidden: bool = True, zero_init: bool = True):
     super().__init__()
-    self.mlp = nn.Sequential(
-      nn.Linear(value_dim, value_dim),
-      nn.GELU(),
-      nn.Linear(value_dim, out_dim),
-    )
+    layers = [nn.Linear(value_dim, value_dim), nn.GELU()] if hidden else []
+    self.net = nn.Sequential(*layers, nn.Linear(value_dim, out_dim))
     self.expand = expand
 
-    last_linear = self.mlp[-1]
-    assert isinstance(last_linear, nn.Linear)
-
-    nn.init.zeros_(last_linear.weight)
-    nn.init.zeros_(last_linear.bias)
+    if zero_init:
+      nn.init.zeros_(self.net[-1].weight)
+      nn.init.zeros_(self.net[-1].bias)
 
   def forward(self, x):
-    return self.expand(self.mlp(x))
+    return self.expand(self.net(x))
 
 
-class FiLMDecoder(Decoder):
-  # outputs gamma, beta stacked on channels, applied by hook_film
-  def __init__(self, value_dim: int, out_dim: int, expand: nn.Module):
-    super().__init__(value_dim, 2 * out_dim, expand)
+class LinearDecoder(Decoder):
+  def __init__(self, value_dim: int, out_dim: int, expand: nn.Module, zero_init: bool = True):
+    super().__init__(value_dim, out_dim, expand, hidden=False, zero_init=zero_init)
 
 
 # (n, n) attention masks, True blocks receiver i from reading sender j
@@ -122,3 +126,14 @@ class TarMACBus(nn.Module):
     scores = scores.masked_fill(self.mask, float("-inf"))
     attn = scores.softmax(dim=-1)
     return attn @ V, attn  # (b, n, value_dim), (b, n, n)
+
+
+class PatchAttention(nn.Module):
+  """Attention across one member's own patches."""
+  def __init__(self, dim: int, key_dim: int, n_patches: int):
+    super().__init__()
+    self.encoder = EyeQKVEncoder(dim, key_dim, dim, nn.Identity())
+    self.bus = TarMACBus(all_mask(n_patches))
+
+  def forward(self, x: t.Tensor) -> tuple[t.Tensor, t.Tensor]:
+    return self.bus(*self.encoder(x))  # (b, p, d), (b, p, p)

@@ -37,7 +37,7 @@ uv run python scripts/replicate_joint.py \
   -- \
   communicative \
   --manifest "$MANIFEST" \
-  --decoder film \
+  --decoder mlp --inject film \
   --epochs "$EPOCHS" \
   --k-rounds "$K_ROUNDS" \
   --output-dir "$EXP_DIR/checkpoints" \

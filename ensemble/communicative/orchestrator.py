@@ -6,17 +6,28 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ensemble.communicative.driver import Driver
-from ensemble.communicative.bus import QKVEncoder, Decoder, TarMACBus
-from ensemble.communicative.hooks import get_encoder_hook, get_decoder_hook, HookState
+from ensemble.communicative.bus import QKVEncoder, Decoder, PatchAttention, TarMACBus
+from ensemble.communicative.hooks import Injection, HookState, hook_encoder, hook_inject
 
 from typing import Annotated
 
+def attn_entropy(attn: t.Tensor) -> float:
+  return -(attn * (attn + 1e-12).log()).sum(dim=-1).mean().item()
+
+
+def attn_top1(attn: t.Tensor) -> float:
+  return attn.max(dim=-1).values.mean().item()
+
+
 class Specialist(nn.Module):
-  def __init__(self, driver: Driver, decoder: Decoder, encoder: QKVEncoder):
+  def __init__(self, driver: Driver, decoder: Decoder, encoder: QKVEncoder,
+               inject: Injection, patch_attn: PatchAttention | None = None):
     super().__init__()
     self.driver = driver
     self.decoder = decoder
     self.encoder = encoder
+    self.inject = inject
+    self.patch_attn = patch_attn
 
 
 class Orchestrator(nn.Module):
@@ -42,6 +53,8 @@ class Orchestrator(nn.Module):
     # the bus's post-softmax attention itself, (b, p, n, n), detached — entropy
     # says how concentrated routing is, this says who it concentrated *on*
     self.last_attn: t.Tensor | None = None
+    # same as last_attn_entropy, for the attention across patches
+    self.last_patch_attn_entropy: float | None = None
     # per-specialist logits before (perception pass) and after communication,
     # detached — lets the trainer measure how messages changed the answers
     self.last_shift: dict[str, t.Tensor] | None = None
@@ -58,10 +71,8 @@ class Orchestrator(nn.Module):
   def _register_hooks(self, stack: ExitStack, decoder_outs: list[HookState], encoder_ins: list[HookState]):
     for i, s in enumerate(self.specialists):
       assert isinstance(s, Specialist)
-      decoder_hook = get_decoder_hook(s.decoder)
-      encoder_hook = get_encoder_hook(s.encoder)
-      stack.enter_context(decoder_hook(s.driver.early, decoder_outs[i]))
-      stack.enter_context(encoder_hook(s.driver.late, encoder_ins[i]))
+      stack.enter_context(hook_inject(s.driver.early, decoder_outs[i], s.inject.combine))
+      stack.enter_context(hook_encoder(s.driver.late, encoder_ins[i]))
 
   def forward(self, xs: t.Tensor | list[t.Tensor], k_rounds: int = 1) -> t.Tensor:
     n: Annotated[int, "num_specialists"] = len(self.specialists)
@@ -80,6 +91,7 @@ class Orchestrator(nn.Module):
     self.last_attn_entropy = None
     self.last_attn_top1 = None
     self.last_attn = None
+    self.last_patch_attn_entropy = None
     self.last_shift = None
     pre_logits = None
 
@@ -109,9 +121,14 @@ class Orchestrator(nn.Module):
 
         # aggregate messages and stage them for injection on the next pass
         c, attn = self.bus(Q, K, V)
+        patch_attns = []
         for i, s in enumerate(self.specialists):
           assert isinstance(s, Specialist)
-          decoder_outs[i].value = s.decoder(c[..., i, :])
+          ci = c[..., i, :]  # (b, p, d)
+          if s.patch_attn is not None:
+            ci, pattn = s.patch_attn(ci)
+            patch_attns.append(pattn)
+          decoder_outs[i].value = s.decoder(ci)
 
         # mean L2 norms of what is said, what is heard, and what is injected —
         # a collapse toward zero here means the continuous messages vanished
@@ -123,16 +140,11 @@ class Orchestrator(nn.Module):
               decoder_outs[i].value.flatten(1).norm(dim=1).mean() for i in range(n)
             ]).mean().item(),
           }
-          # per-row (per-receiver) entropy of the attention distribution over
-          # senders, averaged across receivers and batch — low entropy means a
-          # receiver is listening to ~one sender, high (up to log(n), uniform)
-          # means it's spreading attention evenly
-          row_entropy = -(attn * (attn + 1e-12).log()).sum(dim=-1)  # (b, n)
-          self.last_attn_entropy = row_entropy.mean().item()
-          # peak of each receiver's distribution, averaged the same way: 1/n is
-          # uniform, 1.0 is a hard one-hot gate
-          self.last_attn_top1 = attn.max(dim=-1).values.mean().item()
+          self.last_attn_entropy = attn_entropy(attn)
+          self.last_attn_top1 = attn_top1(attn)
           self.last_attn = attn.detach()
+          if patch_attns:
+            self.last_patch_attn_entropy = attn_entropy(t.stack(patch_attns))
 
     if pre_logits is not None:
       self.last_shift = {"pre": pre_logits, "post": outputs.detach()}

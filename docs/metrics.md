@@ -130,6 +130,16 @@ Tracked with no context — one series.
 | `aggregated` | what a specialist receives after attention — the softmax-weighted combination of every sender's value, specific to that receiver's query. |
 | `injection` | what the decoder actually adds back into the backbone, after transforming the aggregated message. A collapse toward zero at 'value' means specialists stopped saying anything meaningful; a collapse only at 'aggregated' means attention is washing messages out in the combination; a collapse only at 'injection' means the decoder itself is suppressing them before they reach the backbone. |
 
+#### `patch_attn_entropy`
+
+**Summary.** Mean per-row entropy of each specialist's attention across its own patches (--patch-attn), averaged over specialists, patches and the batch.
+
+**Computation.** -(attn * attn.log()).sum(-1) on PatchAttention's (b, p, p) post-softmax attn inside Orchestrator.forward, stacked over specialists and meaned to one scalar per step.
+
+**Intent.** Whether patches mix at all. Near log(p) means each patch takes a flat average over all patches, so the spatial layout is washed out; low means each patch reads from a few others.
+
+Tracked with no context — one series.
+
 #### `routing_mode_share`
 
 **Summary.** Fraction of examples in the batch whose routing pattern is the single most common one.
@@ -161,7 +171,7 @@ Tracked with no context — one series.
 
 **Computation.** _evaluate_with_shift() records attn.argmax(-1) for the whole val set as an (N, k) tensor in loader order; route_flip_rate() diffs it against the previous epoch's and takes the mean. The comparison is well-defined because the val loader is shuffle=False over a fixed Subset with no augmentation, so row r is the same image every epoch. Not tracked at epoch 0 — there is nothing to diff against, and a 0.0 there would read as 'routing never moved', the exact opposite of the truth.
 
-**Intent.** Whether the wiring was learned or decided at initialization. routing_mode_share is a snapshot: a reading of 1.0 at the last epoch is equally consistent with routing that explored early and then collapsed (an architecture/objective problem — fix with temperature or entropy regularization) and with routing that was set by random init and never moved because the softmax saturated and the query/key gradients died (a training-dynamics problem — fix with key/query normalization or score scaling). Same endpoint, opposite remedies, and only the trajectory distinguishes them: high-then-decaying is the first, flat at ~0 from epoch 1 is the second. Note the Decoder's output layer is zero-initialized, so the injected message starts at exactly zero and attention gets no learning signal for the first steps — the second story is live. Reference points for k=3: 0.0 is identical to last epoch, 0.667 is as different as re-randomizing. Cross-check a high value against attn_top1 — flipping among near-ties is tie noise, not re-routing.
+**Intent.** Whether the wiring was learned or decided at initialization. routing_mode_share is a snapshot: a reading of 1.0 at the last epoch is equally consistent with routing that explored early and then collapsed (an architecture/objective problem — fix with temperature or entropy regularization) and with routing that was set by random init and never moved because the softmax saturated and the query/key gradients died (a training-dynamics problem — fix with key/query normalization or score scaling). Same endpoint, opposite remedies, and only the trajectory distinguishes them: high-then-decaying is the first, flat at ~0 from epoch 1 is the second. Note the Decoder's output layer is zero-initialized (except --inject replace), so the injected message starts at exactly zero and attention gets no learning signal for the first steps — the second story is live. Reference points for k=3: 0.0 is identical to last epoch, 0.667 is as different as re-randomizing. Cross-check a high value against attn_top1 — flipping among near-ties is tie noise, not re-routing.
 
 Tracked with no context — one series.
 
@@ -299,10 +309,11 @@ Whether optimization itself is healthy — orthogonal to whether communication h
 | `component` value | meaning |
 |---|---|
 | `total` | every trainable parameter combined. |
+| `patch_attn` | a specialist's attention across its own patches after the bus (--patch-attn), all of its query/key/value weights. |
 | `query_head` | the receiver projection in a specialist's QKVEncoder. Only receives gradient through the attention softmax, so it's the earliest warning if attention saturates and stops passing gradient back. |
 | `key_head` | the signature projection in a specialist's QKVEncoder. Same softmax-only gradient path as query_head — the two are the first components to go quiet. |
 | `value_head` | the sender projection in a specialist's QKVEncoder — what gets broadcast as a message. |
-| `decoder` | the MLP that turns an aggregated message into an injection back into the backbone. |
+| `decoder` | the network (--decoder mlp or linear) that turns an aggregated message into an injection back into the backbone. |
 | `fc` | the backbone's own classification head — the one part of the otherwise-frozen backbone left trainable. |
 | `trunk` | the shared MLP trunk before it diverges into query/key/value heads. Present for --encoder mlp (Linear->GELU->LayerNorm) and --encoder mlp_no_ln (Linear->GELU, no LayerNorm) — not for qkv, which has no shared trunk at all. |
 
@@ -334,10 +345,11 @@ Whether optimization itself is healthy — orthogonal to whether communication h
 | `component` value | meaning |
 |---|---|
 | `total` | every trainable parameter combined. |
+| `patch_attn` | a specialist's attention across its own patches after the bus (--patch-attn), all of its query/key/value weights. |
 | `query_head` | the receiver projection in a specialist's QKVEncoder. Only receives gradient through the attention softmax, so it's the earliest warning if attention saturates and stops passing gradient back. |
 | `key_head` | the signature projection in a specialist's QKVEncoder. Same softmax-only gradient path as query_head — the two are the first components to go quiet. |
 | `value_head` | the sender projection in a specialist's QKVEncoder — what gets broadcast as a message. |
-| `decoder` | the MLP that turns an aggregated message into an injection back into the backbone. |
+| `decoder` | the network (--decoder mlp or linear) that turns an aggregated message into an injection back into the backbone. |
 | `fc` | the backbone's own classification head — the one part of the otherwise-frozen backbone left trainable. |
 | `trunk` | the shared MLP trunk before it diverges into query/key/value heads. Present for --encoder mlp (Linear->GELU->LayerNorm) and --encoder mlp_no_ln (Linear->GELU, no LayerNorm) — not for qkv, which has no shared trunk at all. |
 

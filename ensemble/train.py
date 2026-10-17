@@ -41,8 +41,9 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from backbone.resnet import ResNet
 from ensemble.communicative.driver import Driver
-from ensemble.communicative.bus import QKVEncoder, MLPEncoder, MLPNoLNEncoder, Decoder, FiLMDecoder
-from ensemble.communicative.bus import TarMACBus, all_mask, others_mask, self_mask
+from ensemble.communicative.bus import QKVEncoder, EyeQKVEncoder, MLPEncoder, MLPNoLNEncoder, Decoder, LinearDecoder
+from ensemble.communicative.bus import PatchAttention, TarMACBus, all_mask, others_mask, self_mask
+from ensemble.communicative.hooks import INJECTIONS
 from ensemble.communicative.orchestrator import Specialist, Orchestrator
 from ensemble.eval import evaluate
 from ensemble import metric_docs
@@ -96,7 +97,8 @@ class TrainJob:
 # trainable components of the orchestrator, matched against parameter name
 # tokens; query/key norms are the early warning for vanishing gradients since
 # they only receive gradient through the attention softmax
-_GRAD_COMPONENTS = ("query_head", "key_head", "value_head", "decoder", "fc", "trunk")
+# patch_attn first: its own query/key/value heads would otherwise count as the encoder's
+_GRAD_COMPONENTS = ("patch_attn", "query_head", "key_head", "value_head", "decoder", "fc", "trunk")
 
 
 def _component_of(param_name: str) -> Optional[str]:
@@ -488,6 +490,9 @@ def train(job: TrainJob, *args, **kwargs) -> list[float]:
           attn_entropy = getattr(job.model, "last_attn_entropy", None)
           if attn_entropy is not None:
             job.run.track(attn_entropy, name="attn_entropy", step=step, epoch=epoch)
+          patch_attn_entropy = getattr(job.model, "last_patch_attn_entropy", None)
+          if patch_attn_entropy is not None:
+            job.run.track(patch_attn_entropy, name="patch_attn_entropy", step=step, epoch=epoch)
           # peak attention weight, the same row statistic read as a max instead
           # of an entropy
           attn_top1 = getattr(job.model, "last_attn_top1", None)
@@ -635,13 +640,14 @@ class SpecialistSpec:
   late: str
   encoder: str = "qkv"
   decoder: str = "mlp"
+  inject: str = "add"
 
 
 # Swappable head implementations, keyed by the name SpecialistSpec.encoder /
 # .decoder refers to. Additive only: a new head architecture is added by
 # registering a class here, never by editing build_communicative.
-ENCODERS: dict[str, type] = {"qkv": QKVEncoder, "mlp": MLPEncoder, "mlp_no_ln": MLPNoLNEncoder}
-DECODERS: dict[str, type] = {"mlp": Decoder, "film": FiLMDecoder}
+ENCODERS: dict[str, type] = {"qkv": QKVEncoder, "qkv_eye": EyeQKVEncoder, "mlp": MLPEncoder, "mlp_no_ln": MLPNoLNEncoder}
+DECODERS: dict[str, type] = {"mlp": Decoder, "linear": LinearDecoder}
 MASKS: dict[str, Callable[[int], torch.Tensor]] = {"all": all_mask, "others": others_mask, "self": self_mask}
 
 
@@ -671,6 +677,7 @@ def resolve_specialist_specs(
       late=o.get("late", defaults.late),
       encoder=o.get("encoder", defaults.encoder),
       decoder=o.get("decoder", defaults.decoder),
+      inject=o.get("inject", defaults.inject),
     ))
   return specs
 
@@ -699,6 +706,7 @@ def build_communicative(
   device: str,
   patch: int = 0,
   attn: str = "all",
+  patch_attn: bool = False,
 ) -> Orchestrator:
   from einops.layers.torch import Reduce, Rearrange
 
@@ -725,12 +733,17 @@ def build_communicative(
       dec_out = early_ch * up_h * up_w
       expand = Rearrange("b (msg_h msg_w) (c up_h up_w) -> b c (msg_h up_h) (msg_w up_w)",
                          msg_h=msg_h, up_h=up_h, up_w=up_w)
+    assert not (patch == 0 and spec.inject == "replace"), "replace needs --patch >= 1"
+    assert not (patch == 0 and patch_attn), "patch attention needs --patch >= 1"
+    inject = INJECTIONS[spec.inject]
     decoder_cls = DECODERS[spec.decoder]
     encoder_cls = ENCODERS[spec.encoder]
     specialists.append(Specialist(
       Driver(model, spec.early, spec.late),
-      decoder_cls(value_dim, dec_out, expand),
+      decoder_cls(value_dim, inject.width * dec_out, expand, zero_init=inject.zero_init),
       encoder_cls(enc_in, key_dim, value_dim, reduce),
+      inject,
+      PatchAttention(value_dim, key_dim, (lh // patch) * (lw // patch)) if patch_attn else None,
     ))
   bus = TarMACBus(MASKS[attn](len(specs)))
   return Orchestrator(specialists, bus, key_dim, value_dim, num_classes).to(device)
@@ -805,7 +818,7 @@ def main() -> None:
   backbone_group.add_argument("--backbones", type=Path, nargs="+",
                  help="Backbone checkpoint paths (≥2), for ad hoc runs outside selection")
   p.add_argument("--specialist-config", type=Path, default=None,
-                 help='JSON {"<index>": {early?, late?, encoder?, decoder?}} sparse '
+                 help='JSON {"<index>": {early?, late?, encoder?, decoder?, inject?}} sparse '
                       "per-specialist overrides, keyed by position in the resolved "
                       "backbone list — only positions differing from --early/--late "
                       "need an entry")
@@ -816,6 +829,8 @@ def main() -> None:
                  help="Encoder head architecture (default for all specialists)")
   p.add_argument("--decoder", default="mlp", choices=sorted(DECODERS),
                  help="Decoder head architecture (default for all specialists)")
+  p.add_argument("--inject", default="add", choices=sorted(INJECTIONS),
+                 help="How the decoded message enters the early layer (default for all specialists)")
   p.add_argument("--key-dim", type=int, default=16)
   p.add_argument("--value-dim", type=int, default=64)
   p.add_argument("--patch", type=int, default=0,
@@ -828,6 +843,8 @@ def main() -> None:
   p.add_argument("--patience", type=int, default=0, help="Early stopping patience in epochs (0 = off)")
   p.add_argument("--member-loss", type=float, default=0.0, help="Weight on per-member CE loss (0 = off)")
   p.add_argument("--attn", default="all", choices=sorted(MASKS), help="Which senders each receiver can attend to")
+  p.add_argument("--patch-attn", action="store_true",
+                 help="Per member attention across its own patches after the bus (needs --patch >= 1)")
   p.add_argument("--unfreeze", nargs="*", default=[], help="Backbone blocks to train, e.g. layer1.2")
   p.add_argument("--epochs", type=int, default=10)
   p.add_argument("--lr", type=float, default=1e-3)
@@ -874,6 +891,7 @@ def main() -> None:
   specs = resolve_specialist_specs(backbone_paths, args, args.specialist_config)
   orchestrator = build_communicative(
     specs, args.key_dim, args.value_dim, args.num_classes, args.device, args.patch, args.attn,
+    args.patch_attn,
   )
   if args.freeze_fc:
     for s in orchestrator.specialists:
@@ -910,13 +928,13 @@ def main() -> None:
       "specialist_config": str(args.specialist_config) if args.specialist_config else None,
       "split_file": str(args.split_file),
       "early": args.early, "late": args.late,
-      "encoder": args.encoder, "decoder": args.decoder,
+      "encoder": args.encoder, "decoder": args.decoder, "inject": args.inject,
       "key_dim": args.key_dim, "value_dim": args.value_dim,
       "k_rounds": args.k_rounds, "patch": args.patch,
       "batch_size": args.batch_size,
       "deterministic": args.deterministic,
       "freeze_fc": args.freeze_fc,
-      "attn": args.attn, "unfreeze": args.unfreeze,
+      "attn": args.attn, "patch_attn": args.patch_attn, "unfreeze": args.unfreeze,
     }
     run["baseline_avg_probs"] = baseline
     run["metric_docs"] = metric_docs.as_dict()
@@ -961,11 +979,11 @@ def main() -> None:
       "backbones": [str(p) for p in backbone_paths],
       "split_file": str(args.split_file),
       "early": args.early, "late": args.late,
-      "encoder": args.encoder, "decoder": args.decoder,
+      "encoder": args.encoder, "decoder": args.decoder, "inject": args.inject,
       "key_dim": args.key_dim, "value_dim": args.value_dim,
       "k_rounds": args.k_rounds, "patch": args.patch,
       "freeze_fc": args.freeze_fc, "best_epoch": job.best_epoch,
-      "attn": args.attn, "unfreeze": args.unfreeze,
+      "attn": args.attn, "patch_attn": args.patch_attn, "unfreeze": args.unfreeze,
       "baseline_avg_probs": baseline,
       **final_flat,
       **asdict(cfg),

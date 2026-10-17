@@ -1,37 +1,42 @@
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Callable
 
 import torch as t
 import torch.nn as nn
 
-from ensemble.communicative.bus import Decoder, FiLMDecoder
 
 @dataclass
 class HookState:
   value: t.Tensor | None = None
 
 
+def film(x: t.Tensor, m: t.Tensor) -> t.Tensor:
+  gamma, beta = m.chunk(2, dim=1)
+  return x * (1 + gamma) + beta
+
+
+@dataclass(frozen=True)
+class Injection:
+  combine: Callable[[t.Tensor, t.Tensor], t.Tensor]
+  width: int  # decoder output channels per backbone channel
+  zero_init: bool
+
+
+INJECTIONS = {
+  "add": Injection(lambda x, m: x + m, 1, True),
+  "film": Injection(film, 2, True),
+  "replace": Injection(lambda x, m: m, 1, False),
+}
+
+
 @contextmanager
-def hook_decoder(layer: nn.Module, state: HookState):
+def hook_inject(layer: nn.Module, state: HookState, combine: Callable):
   # HookState is mutated across rounds; None means no message yet (perception pass)
   def fn(_, inputs):
     if state.value is None:
       return
-    return (inputs[0] + state.value,)
-  handle = layer.register_forward_pre_hook(fn)
-  try:
-    yield
-  finally:
-    handle.remove()
-
-
-@contextmanager
-def hook_film(layer: nn.Module, state: HookState):
-  def fn(_, inputs):
-    if state.value is None:
-      return
-    gamma, beta = state.value.chunk(2, dim=1)
-    return (inputs[0] * (1 + gamma) + beta,)
+    return (combine(inputs[0], state.value),)
   handle = layer.register_forward_pre_hook(fn)
   try:
     yield
@@ -48,14 +53,3 @@ def hook_encoder(layer: nn.Module, state: HookState):
     yield
   finally:
     handle.remove()
-
-
-_DECODER_HOOKS = {Decoder: hook_decoder, FiLMDecoder: hook_film}
-
-
-def get_decoder_hook(decoder: nn.Module):
-  return _DECODER_HOOKS[type(decoder)]
-
-
-def get_encoder_hook(encoder: nn.Module):
-  return hook_encoder

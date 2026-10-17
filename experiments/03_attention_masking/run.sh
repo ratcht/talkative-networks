@@ -19,13 +19,13 @@ case "$arm" in
   mlp_all)               flags=(--decoder mlp --attn all) ;;
   mlp_others)            flags=(--decoder mlp --attn others) ;;
   mlp_self)              flags=(--decoder mlp --attn self) ;;
-  film_all)              flags=(--decoder film --attn all) ;;
-  film_others)           flags=(--decoder film --attn others) ;;
-  film_self)             flags=(--decoder film --attn self) ;;
+  film_all)              flags=(--decoder mlp --inject film --attn all) ;;
+  film_others)           flags=(--decoder mlp --inject film --attn others) ;;
+  film_self)             flags=(--decoder mlp --inject film --attn self) ;;
   mlp_all_unfreeze)      flags=(--decoder mlp --attn all "${UNFREEZE[@]}") ;;
   mlp_others_unfreeze)   flags=(--decoder mlp --attn others "${UNFREEZE[@]}") ;;
-  film_all_unfreeze)     flags=(--decoder film --attn all "${UNFREEZE[@]}") ;;
-  film_others_unfreeze)  flags=(--decoder film --attn others "${UNFREEZE[@]}") ;;
+  film_all_unfreeze)     flags=(--decoder mlp --inject film --attn all "${UNFREEZE[@]}") ;;
+  film_others_unfreeze)  flags=(--decoder mlp --inject film --attn others "${UNFREEZE[@]}") ;;
   k0_unfreeze)           flags=(--k-rounds 0 "${UNFREEZE[@]}") ;;
   *)
     echo "usage: $0 {mlp|film}_{all|others|self} | {mlp|film}_{all|others}_unfreeze | k0_unfreeze" >&2
