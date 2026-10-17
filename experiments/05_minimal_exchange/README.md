@@ -2,7 +2,7 @@
 
 ## Question
 
-Can members exchange information without attention? Messages are mixed by a plain average, or by a learned gate (like an MoE router).
+How much does the way members are mixed matter? Messages are mixed by a plain average, a learned gate (like an MoE router), or attention. Everything else in the pipeline is the same, so the arms differ only in the mixing.
 
 ## Words used below
 
@@ -26,7 +26,7 @@ flowchart TD
   R2 --> P2["projection"]
   R3 --> P3["projection"]
 
-  P1 & P2 & P3 --> MIX["mix over members<br/>average, or gate<br/>(B, 64, s)"]
+  P1 & P2 & P3 --> MIX["mix over members<br/>average, gate, or attention<br/>(B, 64, s)"]
 
   MIX --> D1["decoder 1<br/>(B, 16, 32, 32)"]
   MIX --> D2["decoder 2"]
@@ -73,7 +73,16 @@ Each output position is a learned weighted sum of the 64 grid cells. The same ma
   3. message = g₁·x₁ + g₂·x₂ + g₃·x₃
   4. The gate's linear layer starts at zero, so g = (1/3, 1/3, 1/3) at step 0. The gate arm starts out identical to the average arm.
 
-Both give **every receiver the same message**. Only the receivers' decoders differ.
+Average and gate give **every receiver the same message**. Only the receivers' decoders differ.
+
+- **attention:**
+  1. q_i = W_q · flatten(x_i), k_j = W_k · flatten(x_j), each from 64 · s numbers to d_k = 16.
+  2. A_i = softmax over j of (q_i · k_j / √d_k). Receiver i's three weights, self included, summing to 1.
+  3. message_i = A_i1·x₁ + A_i2·x₂ + A_i3·x₃
+  4. No value map: the message is made of the projected states x_j themselves, as in average and gate.
+  5. W_q, W_k: standard init (PyTorch `nn.Linear`).
+
+Attention is the gate with one difference: **each receiver gets its own weights**, so each receiver gets its own message.
 
 ### Steps 5 to 7: decoder
 
@@ -93,8 +102,9 @@ Init:
 |---|---|---|---|---|
 | average | none, 64→64, 64→32 | linear, MLP | additive, replace | 12 |
 | gate | none, 64→64, 64→32 | linear, MLP | additive, replace | 12 |
+| attention | none, 64→64, 64→32 | linear, MLP | additive, replace | 12 |
 
-24 arms × 3 seeds = 72 runs.
+36 arms × 3 seeds = 108 runs.
 
 ## Training setup (same as experiment 04)
 
@@ -127,8 +137,8 @@ Experiments 04 and 05 both keep `layer3.0` → `layer1.2` so they can be compare
 
 ## Code changes
 
-- `bus.py`: position projection (none / 64→64 / 64→32), average and gate mixing, the two-step decoder.
+- `bus.py`: position projection (none / 64→64 / 64→32), average, gate and attention mixing, the two-step decoder.
 - `hooks.py`: `hook_replace`, shared with experiment 04.
 - `train.py`: flags for mixing, projection size, decoder and injection.
-- `train.py` logging: gate weights g (mean and entropy per member) for the gate arms. Projections, gate and decoders get their own `grad_norm` component.
+- `train.py` logging: gate weights g (mean and entropy per member) for the gate arms, attention weights A (same metrics, plus self weight) for the attention arms. Projections, gate and decoders get their own `grad_norm` component.
 - `experiments/05_minimal_exchange/`: `run.sh`, `commands.md`.
