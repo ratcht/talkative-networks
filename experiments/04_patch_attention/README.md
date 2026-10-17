@@ -14,37 +14,55 @@ Does a second attention block that mixes across patches help? And how do the dec
 | patch | one piece of the read-point grid, set by `--patch`. |
 | round | one full forward pass of every backbone. K = number of communication rounds. |
 
-## Architecture (one round, 3 members)
+## Architecture (K = 1, so 2 passes)
+
+Members only meet in block 1. Every other step is per member.
 
 ```mermaid
 flowchart TD
-  img[image, same for every member]
+  img["image, same for every member"]
 
-  img --> B1[member 1: layers up to read point]
-  img --> B2[member 2: layers up to read point]
-  img --> B3[member 3: layers up to read point]
+  subgraph P0["pass 0: no message yet"]
+    F1["member 1: image → layer3.0<br/>nothing injected"]
+    F2["member 2: image → layer3.0<br/>nothing injected"]
+    F3["member 3: image → layer3.0<br/>nothing injected"]
+  end
 
-  B1 -->|h1| R[reshape by --patch<br/>no learned weights]
-  B2 -->|h2| R
-  B3 -->|h3| R
+  img --> F1 & F2 & F3
 
-  R --> ATT1["block 1: attention across members<br/>each patch attends to the same patch of every member, self included"]
-  ATT1 --> ATT2["block 2 (on/off arm, patch > 0 only)<br/>attention across patches<br/>each patch attends to the receiver's own patches"]
+  F1 -->|"read: layer3.0 output<br/>(64, 8, 8)"| S1["member 1: reshape by --patch<br/>(P, d)"]
+  F2 -->|read| S2["member 2: reshape<br/>(P, d)"]
+  F3 -->|read| S3["member 3: reshape<br/>(P, d)"]
 
-  ATT2 -->|m1| D1[decoder 1<br/>linear or MLP]
-  ATT2 -->|m2| D2[decoder 2]
-  ATT2 -->|m3| D3[decoder 3]
+  S1 & S2 & S3 --> BL1["block 1: attention across members<br/>each patch of each receiver attends to the same patch of all 3 members, self included<br/>(P, n, d)"]
 
-  D1 -->|additive or replace| W1[member 1: input of layer1.2]
-  D2 -->|additive or replace| W2[member 2: input of layer1.2]
-  D3 -->|additive or replace| W3[member 3: input of layer1.2]
+  BL1 --> C1["member 1: block 2<br/>attention across its own P patches<br/>(on/off arm)"]
+  BL1 --> C2["member 2: block 2"]
+  BL1 --> C3["member 3: block 2"]
 
-  W1 & W2 & W3 --> NEXT[run backbones again:<br/>next round, or final logits]
+  C1 --> D1["member 1: decoder<br/>linear or MLP<br/>(16, 32, 32)"]
+  C2 --> D2["member 2: decoder"]
+  C3 --> D3["member 3: decoder"]
+
+  subgraph P1["pass 1"]
+    E1["member 1: image → up to layer1.2"] --> W1["member 1: write at input of layer1.2<br/>additive or replace"] --> G1["member 1: layer1.2 → logits"]
+    E2["member 2: image → up to layer1.2"] --> W2["member 2: write at input of layer1.2"] --> G2["member 2: layer1.2 → logits"]
+    E3["member 3: image → up to layer1.2"] --> W3["member 3: write at input of layer1.2"] --> G3["member 3: layer1.2 → logits"]
+  end
+
+  img --> E1 & E2 & E3
+  D1 -->|pass-0 message| W1
+  D2 -->|pass-0 message| W2
+  D3 -->|pass-0 message| W3
+
+  G1 & G2 & G3 --> AVG["average softmax probabilities<br/>final prediction"]
 ```
 
-When block 2 is off, block 1's output goes straight to the decoders.
+- The message written in a pass is always the one built in the **previous** pass. Pass 0 has nothing to write.
+- With K > 1, each pass also reads at `layer3.0` again (now affected by the message) and builds the message for the next pass. The last pass only produces logits.
+- When block 2 is off, block 1's output goes straight to the decoders.
 
-Final prediction: average of the 3 members' softmax probabilities (same as now).
+Final prediction: average of the 3 members' softmax probabilities from the last pass (same as now).
 
 ## Shapes, step by step
 
@@ -124,8 +142,8 @@ K = 0 (no communication) = untrained probability averaging: test 0.6652.
 
 ## Code changes
 
-- `bus.py`: W_v initialized to identity, value size = d. Block 2 across patches. Linear decoder option.
-- `hooks.py`: `hook_replace`, returns the decoder output instead of `input + output`.
-- `train.py`: flags `--patch-attn`, `--decoder {mlp,linear}`, `--inject {add,replace}`. Decoder init chosen by injection.
-- `train.py` logging: block 1 attention metrics as now. Block 2 attention has shape (b, n, P, P), so only its entropy is tracked. Block 2 and the new decoders get their own `grad_norm` component.
+- `bus.py`: `EyeQKVEncoder` (`--encoder qkv_eye`, W_v initialized to identity, needs `--value-dim` = d). `PatchAttention` for block 2. `LinearDecoder` (`--decoder linear`).
+- `hooks.py`: one `hook_inject` with `INJECTIONS` (`--inject {add,film,replace}`). Each mode sets how the message combines with the input, the decoder output width, and the decoder init. FiLM moved here from `--decoder film`.
+- `train.py`: flag `--patch-attn`.
+- `train.py` logging: block 1 attention metrics as now. Block 2 attention has shape (b, n, P, P), so only its entropy is tracked. Block 2 gets its own `grad_norm` component (`patch_attn`).
 - `experiments/04_patch_attention/`: README, `run.sh`, `commands.md`.
