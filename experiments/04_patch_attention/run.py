@@ -13,14 +13,28 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 EXP_DIR = "experiments/04_patch_attention"
+PREFIX = "pa_"
+
+SPLIT_FILE = "splits/three_way_seed42.pt"
+MANIFEST = "selection/manifests/encoder_study_group.json"
+SEEDS = 3
+EPOCHS = 70
+PATIENCE = 10
+ENCODER = "qkv_eye"
 LATE_CH = 64  # channels at the layer3.0 output
+
+# arm grid. patch 0 has one patch, so no patch attention and no replace
+PATCHES = (1, 2)
+PATTN = (True, False)
+DECODERS = ("linear", "mlp")
+INJECTS = ("add", "replace")
 
 
 def arms() -> dict[str, dict]:
   out = {}
-  for dec in ("linear", "mlp"):
+  for dec in DECODERS:
     out[f"p0_{dec}_add"] = dict(patch=0, decoder=dec, inject="add", pattn=False)
-  for patch, pattn, dec, inject in product((1, 2), (True, False), ("linear", "mlp"), ("add", "replace")):
+  for patch, pattn, dec, inject in product(PATCHES, PATTN, DECODERS, INJECTS):
     name = f"p{patch}_{dec}_{inject}" + ("_pattn" if pattn else "")
     out[name] = dict(patch=patch, decoder=dec, inject=inject, pattn=pattn)
   return out
@@ -31,17 +45,17 @@ def command(name: str, patch: int, decoder: str, inject: str, pattn: bool) -> li
   value_dim = LATE_CH * max(patch, 1) ** 2
   return [
     sys.executable, "scripts/replicate_joint.py",
-    "--split-file", "splits/three_way_seed42.pt",
-    "--experiment", f"pa_{name}",
-    "--limit", "3",
-    "--state-file", f"{EXP_DIR}/state/pa_{name}.json",
+    "--split-file", SPLIT_FILE,
+    "--experiment", f"{PREFIX}{name}",
+    "--limit", str(SEEDS),
+    "--state-file", f"{EXP_DIR}/state/{PREFIX}{name}.json",
     "--",
     "communicative",
-    "--manifest", "selection/manifests/encoder_study_group.json",
-    "--encoder", "qkv_eye",
+    "--manifest", MANIFEST,
+    "--encoder", ENCODER,
     "--value-dim", str(value_dim),
-    "--epochs", "70",
-    "--patience", "10",
+    "--epochs", str(EPOCHS),
+    "--patience", str(PATIENCE),
     "--freeze-fc",
     "--output-dir", f"{EXP_DIR}/checkpoints",
     "--patch", str(patch),
