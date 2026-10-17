@@ -351,6 +351,8 @@ def _track_mode_share(run: Run, patterns: dict[str, dict[int, int]], prefix: str
 
 def _track_routing(run: Run, counts: dict[str, tuple[int, int]], prefix: str,
                    step: int, epoch: int) -> None:
+  if not counts:  # no attention, e.g. k_rounds 0
+    return
   num, den = counts["self_attn"]
   if den:
     run.track(num / den, name=f"{prefix}self_attn_rate", step=step, epoch=epoch)
