@@ -173,7 +173,10 @@ def spatial_diagnostics(
     tensor = captured.get(key)
     if tensor is None:
       continue
-    per_specialist = [_centred_rank(tensor[:, i]) for i in range(tensor.shape[1])]
+    # (b, n, d) pooled or (b, p, n, d) patched: the specialist axis sits just
+    # before the feature dim, and patches count as further observations
+    per_specialist = [_centred_rank(tensor[..., i, :].reshape(-1, tensor.shape[-1]))
+                      for i in range(tensor.shape[-2])]
     out[name] = per_specialist
     out[f"{name}_mean"] = sum(per_specialist) / len(per_specialist)
 
