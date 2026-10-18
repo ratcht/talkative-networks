@@ -64,11 +64,13 @@ Final prediction: average of the 3 members' softmax probabilities (same as now).
 
 Each output position is a learned weighted sum of the 64 grid cells. The same matrix is used for all 64 channels.
 
+Init: 64→64 starts as the identity, so those arms start exactly as the none arms. 64→32 starts as the average of each pair of horizontally adjacent cells (8 × 8 → 8 × 4). Both start as a fixed spatial operation and are learned from there.
+
 ### Step 4: mixing
 
 - **average:** message = (x₁ + x₂ + x₃) / 3
 - **gate:**
-  1. score_j = linear(flatten(x_j)), from 64 · s numbers to 1. One score per member.
+  1. score_j = w_j · flatten(x_j), from 64 · s numbers to 1. One score per member, each member with its own w_j.
   2. g = softmax(score₁, score₂, score₃). Three weights that sum to 1, different for every image.
   3. message = g₁·x₁ + g₂·x₂ + g₃·x₃
   4. The gate's linear layer starts at zero, so g = (1/3, 1/3, 1/3) at step 0. The gate arm starts out identical to the average arm.
@@ -76,7 +78,7 @@ Each output position is a learned weighted sum of the 64 grid cells. The same ma
 Average and gate give **every receiver the same message**. Only the receivers' decoders differ.
 
 - **attention:**
-  1. q_i = W_q · flatten(x_i), k_j = W_k · flatten(x_j), each from 64 · s numbers to d_k = 16.
+  1. q_i = W_q,i · flatten(x_i), k_j = W_k,j · flatten(x_j), each from 64 · s numbers to d_k = 16. Every member has its own W_q and W_k.
   2. A_i = softmax over j of (q_i · k_j / √d_k). Receiver i's three weights, self included, summing to 1.
   3. message_i = A_i1·x₁ + A_i2·x₂ + A_i3·x₃
   4. No value map: the message is made of the projected states x_j themselves, as in average and gate.
@@ -110,7 +112,7 @@ Init:
 
 - Experts: `selection/manifests/encoder_study_group.json`
 - Taps `layer1.2` / `layer3.0`, K = 1 (one exchange)
-- Backbones frozen, `--freeze-fc`, `--patience 10`, 70 epochs max
+- Backbones frozen, `--freeze-fc`, `--patience 10`, 150 epochs max. Experiment 04 used 70, but its arms that converged stopped well before that, so the higher cap only changes arms that are still improving.
 - AdamW lr 1e-3, weight decay 1e-4
 - Seeds: 476981973, 621715752, 1882162633
 
@@ -137,8 +139,8 @@ Experiments 04 and 05 both keep `layer3.0` → `layer1.2` so they can be compare
 
 ## Code changes
 
-- `bus.py`: position projection (none / 64→64 / 64→32), average, gate and attention mixing, the two-step decoder.
-- `hooks.py`: `hook_replace`, shared with experiment 04.
-- `train.py`: flags for mixing, projection size, decoder and injection.
-- `train.py` logging: gate weights g (mean and entropy per member) for the gate arms, attention weights A (same metrics, plus self weight) for the attention arms. Projections, gate and decoders get their own `grad_norm` component.
-- `experiments/05_minimal_exchange/`: `run.sh`, `commands.md`.
+- `bus.py`, block `05_minimal_exchange`: `MinimalEncoder` (position projection, per-member gate or query/key heads), `MinimalDecoder` (positions map, optional GELU, channels map), `AverageBus`, `GateBus`. Attention reuses `TarMACBus`.
+- `orchestrator.py`: encoders may return no Q/K, and buses may return no weights (average). Attention stats are skipped when there are no weights.
+- `train.py`: new subcommand `minimal` (`--mix`, `--proj`, `--decoder linear|mlp`), built by `build_minimal_communicative`. Arguments shared by all methods and the train/evaluate/save step were extracted so both subcommands use them.
+- `train.py` logging: `mix_weight` per sender and `self_weight` for any bus that reports weights (gate, attention). `proj` and `score_head` get their own `grad_norm` component. Replace uses `INJECTIONS["replace"]` from experiment 04.
+- `experiments/05_minimal_exchange/`: `run.py`, `commands.md`.
