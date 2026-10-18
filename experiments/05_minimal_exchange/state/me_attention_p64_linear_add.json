@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "config": {
+    "trailing": [
+      "minimal",
+      "--manifest",
+      "selection/manifests/encoder_study_group.json",
+      "--mix",
+      "attention",
+      "--proj",
+      "64",
+      "--decoder",
+      "linear",
+      "--inject",
+      "add",
+      "--epochs",
+      "150",
+      "--patience",
+      "10",
+      "--freeze-fc",
+      "--output-dir",
+      "experiments/05_minimal_exchange/checkpoints"
+    ],
+    "experiment": "me_attention_p64_linear_add",
+    "split_digest": "c6f2c9ce5e2f61af"
+  },
+  "seeds": {
+    "476981973": {
+      "status": "done",
+      "finished": "2026-10-18T11:12:17+00:00",
+      "elapsed_sec": 161.7
+    },
+    "621715752": {
+      "status": "done",
+      "finished": "2026-10-18T11:15:28+00:00",
+      "elapsed_sec": 190.8
+    },
+    "1882162633": {
+      "status": "done",
+      "finished": "2026-10-18T11:18:11+00:00",
+      "elapsed_sec": 162.7
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "config": {
+    "trailing": [
+      "minimal",
+      "--manifest",
+      "selection/manifests/encoder_study_group.json",
+      "--mix",
+      "gate",
+      "--proj",
+      "32",
+      "--decoder",
+      "linear",
+      "--inject",
+      "replace",
+      "--epochs",
+      "150",
+      "--patience",
+      "10",
+      "--freeze-fc",
+      "--output-dir",
+      "experiments/05_minimal_exchange/checkpoints"
+    ],
+    "experiment": "me_gate_p32_linear_replace",
+    "split_digest": "c6f2c9ce5e2f61af"
+  },
+  "seeds": {
+    "476981973": {
+      "status": "done",
+      "finished": "2026-10-18T08:59:28+00:00",
+      "elapsed_sec": 664.1
+    },
+    "621715752": {
+      "status": "done",
+      "finished": "2026-10-18T09:07:09+00:00",
+      "elapsed_sec": 461.1
+    },
+    "1882162633": {
+      "status": "done",
+      "finished": "2026-10-18T09:17:10+00:00",
+      "elapsed_sec": 600.3
+    }
+  }
+}

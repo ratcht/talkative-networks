@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "config": {
+    "trailing": [
+      "minimal",
+      "--manifest",
+      "selection/manifests/encoder_study_group.json",
+      "--mix",
+      "gate",
+      "--proj",
+      "64",
+      "--decoder",
+      "mlp",
+      "--inject",
+      "replace",
+      "--epochs",
+      "150",
+      "--patience",
+      "10",
+      "--freeze-fc",
+      "--output-dir",
+      "experiments/05_minimal_exchange/checkpoints"
+    ],
+    "experiment": "me_gate_p64_mlp_replace",
+    "split_digest": "c6f2c9ce5e2f61af"
+  },
+  "seeds": {
+    "476981973": {
+      "status": "done",
+      "finished": "2026-10-18T08:24:30+00:00",
+      "elapsed_sec": 401.5
+    },
+    "621715752": {
+      "status": "done",
+      "finished": "2026-10-18T08:31:44+00:00",
+      "elapsed_sec": 434.0
+    },
+    "1882162633": {
+      "status": "done",
+      "finished": "2026-10-18T08:39:58+00:00",
+      "elapsed_sec": 493.9
+    }
+  }
+}

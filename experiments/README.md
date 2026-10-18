@@ -9,7 +9,7 @@ One folder per experiment, numbered in the order they were run.
 | 02 | [overfitting](02_overfitting/README.md) | done |
 | 03 | [attention_masking](03_attention_masking/README.md) | done (k0_unfreeze failed) |
 | 04 | [patch_attention](04_patch_attention/README.md) | done |
-| 05 | [minimal_exchange](05_minimal_exchange/README.md) | ready to run |
+| 05 | [minimal_exchange](05_minimal_exchange/README.md) | done |
 
 ## Layout
 
