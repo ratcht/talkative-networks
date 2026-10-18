@@ -78,6 +78,10 @@ _COMPONENT = ContextKey(
                 "first components to go quiet.",
     "value_head": "the sender projection in a specialist's QKVEncoder — what "
                   "gets broadcast as a message.",
+    "score_head": "the gate score in a specialist's MinimalEncoder (minimal, "
+                  "--mix gate): one number per sender, softmaxed over members.",
+    "proj": "the projection over grid positions in a specialist's "
+            "MinimalEncoder (minimal, --proj).",
     "decoder": "the network (--decoder mlp or linear) that turns an "
                "aggregated message into an injection back into the backbone.",
     "fc": "the backbone's own classification head — the one part of the "
@@ -142,6 +146,12 @@ _LAYERNORM_PARAM = ContextKey(
   },
 )
 
+
+_MIX_SENDER = ContextKey(
+  name="sender",
+  values={"<j>": "the member whose message the weight is on, by position in "
+                 "the backbone list."},
+)
 
 _ROUTING_RECEIVER = ContextKey(
   name="receiver",
@@ -300,6 +310,31 @@ _DOCS: tuple[MetricDoc, ...] = (
            "dominant sender and a flat tail (high top1, mid entropy) from "
            "one split evenly between two senders (mid top1, mid entropy), "
            "which entropy alone conflates.",
+    category="communication_content",
+  ),
+  MetricDoc(
+    name="mix_weight",
+    summary="Mean weight each sender gets in the mix, over receivers, patches "
+            "and the batch.",
+    computation="_track_mix_weights(): last_attn (b, p, n, n), receiver-major, "
+                "meaned over every dim but the sender. One series per sender. "
+                "Not tracked when the bus reports no weights (minimal --mix "
+                "average).",
+    intent="Which members the mix relies on. 1/n for every sender is a "
+           "uniform mix; one sender near 1 means the others are ignored. For "
+           "the gate every receiver has the same weights, so this is the gate "
+           "itself.",
+    category="communication_content",
+    context=(_MIX_SENDER,),
+  ),
+  MetricDoc(
+    name="self_weight",
+    summary="Mean weight a receiver puts on its own message.",
+    computation="_track_mix_weights(): the diagonal of last_attn (b, p, n, n), "
+                "meaned over receivers, patches and the batch.",
+    intent="The soft version of self_attn_rate: how much of what a receiver "
+           "hears is itself, not just whether it is the largest share. 1/n "
+           "is uniform.",
     category="communication_content",
   ),
   MetricDoc(

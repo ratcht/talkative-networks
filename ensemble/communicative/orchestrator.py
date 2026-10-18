@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ensemble.communicative.driver import Driver
-from ensemble.communicative.bus import QKVEncoder, Decoder, PatchAttention, TarMACBus
+from ensemble.communicative.bus import PatchAttention
 from ensemble.communicative.hooks import Injection, HookState, hook_encoder, hook_inject
 
 from typing import Annotated
@@ -20,7 +20,9 @@ def attn_top1(attn: t.Tensor) -> float:
 
 
 class Specialist(nn.Module):
-  def __init__(self, driver: Driver, decoder: Decoder, encoder: QKVEncoder,
+  # encoder: late features -> (Q, K, V), Q/K None when the bus does not score.
+  # decoder: the bus's per-receiver message -> the injection at the early layer
+  def __init__(self, driver: Driver, decoder: nn.Module, encoder: nn.Module,
                inject: Injection, patch_attn: PatchAttention | None = None):
     super().__init__()
     self.driver = driver
@@ -31,7 +33,8 @@ class Specialist(nn.Module):
 
 
 class Orchestrator(nn.Module):
-  def __init__(self, specialists: list[Specialist], bus: TarMACBus, key_dim: int, value_dim: int, num_classes: int):
+  # bus: (Q, K, V) -> (messages, weights), weights None when it has none (a plain average)
+  def __init__(self, specialists: list[Specialist], bus: nn.Module, key_dim: int, value_dim: int, num_classes: int):
     super().__init__()
     self.specialists = nn.ModuleList(specialists)
     self.bus = bus
@@ -109,8 +112,8 @@ class Orchestrator(nn.Module):
           qkv.append(s.encoder(encoder_ins[i].value))
 
         # encoders emit (b, p, d), p=1 when pooled; specialist axis goes just
-        # before the feature dim
-        Q, K, V = (t.stack(x, dim=-2) for x in zip(*qkv))
+        # before the feature dim. Q/K stay None for buses that do not score
+        Q, K, V = (None if x[0] is None else t.stack(x, dim=-2) for x in zip(*qkv))
 
         if round_idx == k_rounds:
           break
@@ -140,9 +143,10 @@ class Orchestrator(nn.Module):
               decoder_outs[i].value.flatten(1).norm(dim=1).mean() for i in range(n)
             ]).mean().item(),
           }
-          self.last_attn_entropy = attn_entropy(attn)
-          self.last_attn_top1 = attn_top1(attn)
-          self.last_attn = attn.detach()
+          if attn is not None:
+            self.last_attn_entropy = attn_entropy(attn)
+            self.last_attn_top1 = attn_top1(attn)
+            self.last_attn = attn.detach()
           if patch_attns:
             self.last_patch_attn_entropy = attn_entropy(t.stack(patch_attns))
 

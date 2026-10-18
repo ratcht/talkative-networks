@@ -5,6 +5,9 @@ Methods (one subcommand each; gating will join later):
 
 communicative — TarMAC-aligned ensemble: per-specialist Q/K/V heads, bare
                 attention bus, decoder injection via hooks.
+minimal       — experiment 05: each member's late map, projected over grid
+                positions, is the message itself. Mixed by average, gate or
+                attention, then decoded positions first, channels second.
 
 A `summarize` subcommand aggregates a group of same-config, different-seed
 replicate runs (produced by scripts/replicate_joint.py) into one summary run.
@@ -43,6 +46,7 @@ from backbone.resnet import ResNet
 from ensemble.communicative.driver import Driver
 from ensemble.communicative.bus import QKVEncoder, EyeQKVEncoder, MLPEncoder, MLPNoLNEncoder, Decoder, LinearDecoder
 from ensemble.communicative.bus import PatchAttention, TarMACBus, all_mask, others_mask, self_mask
+from ensemble.communicative.bus import MinimalEncoder, MinimalDecoder, AverageBus, GateBus
 from ensemble.communicative.hooks import INJECTIONS
 from ensemble.communicative.orchestrator import Specialist, Orchestrator
 from ensemble.eval import evaluate
@@ -98,7 +102,8 @@ class TrainJob:
 # tokens; query/key norms are the early warning for vanishing gradients since
 # they only receive gradient through the attention softmax
 # patch_attn first: its own query/key/value heads would otherwise count as the encoder's
-_GRAD_COMPONENTS = ("patch_attn", "query_head", "key_head", "value_head", "decoder", "fc", "trunk")
+_GRAD_COMPONENTS = ("patch_attn", "query_head", "key_head", "value_head", "score_head", "proj",
+                    "decoder", "fc", "trunk")
 
 
 def _component_of(param_name: str) -> Optional[str]:
@@ -365,6 +370,14 @@ def _track_routing(run: Run, counts: dict[str, tuple[int, int]], prefix: str,
                 context={"subset": subset})
 
 
+def _track_mix_weights(run: Run, attn: torch.Tensor, step: int, epoch: int) -> None:
+  # attn: (b, p, n, n), receiver-major. Mean weight each sender gets over
+  # receivers, patches and the batch, and the mean weight a receiver puts on itself
+  for sender, w in enumerate(attn.mean(dim=(0, 1, 2)).tolist()):
+    run.track(w, name="mix_weight", step=step, epoch=epoch, context={"sender": str(sender)})
+  run.track(attn.diagonal(dim1=-2, dim2=-1).mean().item(), name="self_weight", step=step, epoch=epoch)
+
+
 def _track_answer_shift(run: Run, stats: dict[str, float], prefix: str, step: int, epoch: int) -> None:
   # kl is unbounded while the other kinds live in [0, 1] — give it its own
   # metric name so it never shares a y-axis with the rates
@@ -506,6 +519,7 @@ def train(job: TrainJob, *args, **kwargs) -> list[float]:
           attn = getattr(job.model, "last_attn", None)
           if attn is not None:
             _track_mode_share(job.run, routing_pattern_counts(attn), "", step, epoch)
+            _track_mix_weights(job.run, attn, step, epoch)
           # how specialists changed their answers in response to messages
           shift = getattr(job.model, "last_shift", None)
           if shift is not None:
@@ -761,6 +775,45 @@ def _resolve_backbone_paths(manifest: Optional[Path], backbones: Optional[list[P
 
 
 # ---------------------------------------------------------------------------
+# Method: minimal (experiment 05)
+# ---------------------------------------------------------------------------
+
+MIXERS: dict[str, Callable[[int], nn.Module]] = {
+  "average": lambda n: AverageBus(),
+  "gate": lambda n: GateBus(),
+  "attention": lambda n: TarMACBus(all_mask(n)),
+}
+
+
+def build_minimal_communicative(
+  backbone_paths: list[Path],
+  early: str,
+  late: str,
+  inject: str,
+  mix: str,
+  proj: Optional[int],
+  decoder: str,
+  key_dim: int,
+  num_classes: int,
+  device: str,
+) -> Orchestrator:
+  injection = INJECTIONS[inject]
+  specialists = []
+  for path in backbone_paths:
+    model = _load_backbone(path, device)
+    (_, early_ch, eh, ew), (_, late_ch, lh, lw) = _adapter_dims(model, early, late, device)
+    s = proj or lh * lw
+    specialists.append(Specialist(
+      Driver(model, early, late),
+      MinimalDecoder(late_ch, s, injection.width * early_ch, (eh, ew),
+                     hidden=decoder == "mlp", zero_init=injection.zero_init),
+      MinimalEncoder(late_ch, lh * lw, proj, mix, key_dim),
+      injection,
+    ))
+  return Orchestrator(specialists, MIXERS[mix](len(specialists)), key_dim, late_ch * s, num_classes).to(device)
+
+
+# ---------------------------------------------------------------------------
 # Aggregation across seed replicates
 # ---------------------------------------------------------------------------
 
@@ -809,44 +862,29 @@ def summarize_replicates(experiment: str, seeds: list[int], repo: Optional[str] 
   return summary
 
 
-def main() -> None:
-  parser = argparse.ArgumentParser(description="Train an ensemble over frozen backbones")
-  sub = parser.add_subparsers(dest="method", required=True)
+# ---------------------------------------------------------------------------
+# CLI: one subcommand per method, sharing data, training and tracking
+# ---------------------------------------------------------------------------
 
-  p = sub.add_parser("communicative", help="TarMAC-aligned communicative ensemble")
+def _common_args() -> argparse.ArgumentParser:
+  """Arguments every training method takes."""
+  p = argparse.ArgumentParser(add_help=False)
   backbone_group = p.add_mutually_exclusive_group(required=True)
   backbone_group.add_argument("--manifest", type=Path,
                  help="selection/ manifest JSON — trains on its backbones list, in order")
   backbone_group.add_argument("--backbones", type=Path, nargs="+",
                  help="Backbone checkpoint paths (≥2), for ad hoc runs outside selection")
-  p.add_argument("--specialist-config", type=Path, default=None,
-                 help='JSON {"<index>": {early?, late?, encoder?, decoder?, inject?}} sparse '
-                      "per-specialist overrides, keyed by position in the resolved "
-                      "backbone list — only positions differing from --early/--late "
-                      "need an entry")
   p.add_argument("--split-file", type=Path, default=_REPO_ROOT / "splits/three_way_seed42.pt")
   p.add_argument("--early", default="layer1.2", help="Decoder injection layer (default for all specialists)")
   p.add_argument("--late", default="layer3.0", help="Encoder read layer (default for all specialists)")
-  p.add_argument("--encoder", default="qkv", choices=sorted(ENCODERS),
-                 help="Encoder head architecture (default for all specialists)")
-  p.add_argument("--decoder", default="mlp", choices=sorted(DECODERS),
-                 help="Decoder head architecture (default for all specialists)")
   p.add_argument("--inject", default="add", choices=sorted(INJECTIONS),
                  help="How the decoded message enters the early layer (default for all specialists)")
   p.add_argument("--key-dim", type=int, default=16)
-  p.add_argument("--value-dim", type=int, default=64)
-  p.add_argument("--patch", type=int, default=0,
-                 help="Patch size k over the late grid; one attention per k*k patch "
-                      "(1 = per-position, 0 = mean-pool to one message). Must tile "
-                      "both the late and early grids.")
   p.add_argument("--k-rounds", type=int, default=1,
                  help="Communication rounds (backbone passes = k_rounds + 1)")
   p.add_argument("--freeze-fc", action="store_true", help="Freeze each backbone's fc")
   p.add_argument("--patience", type=int, default=0, help="Early stopping patience in epochs (0 = off)")
   p.add_argument("--member-loss", type=float, default=0.0, help="Weight on per-member CE loss (0 = off)")
-  p.add_argument("--attn", default="all", choices=sorted(MASKS), help="Which senders each receiver can attend to")
-  p.add_argument("--patch-attn", action="store_true",
-                 help="Per member attention across its own patches after the bus (needs --patch >= 1)")
   p.add_argument("--unfreeze", nargs="*", default=[], help="Backbone blocks to train, e.g. layer1.2")
   p.add_argument("--epochs", type=int, default=10)
   p.add_argument("--lr", type=float, default=1e-3)
@@ -857,54 +895,94 @@ def main() -> None:
                  help="cudnn.deterministic (default: on). --no-deterministic trades exact "
                       "reproducibility for cudnn's autotuned kernels.")
   p.add_argument("--num-classes", type=int, default=100)
-  p.add_argument("--experiment", default="communicative", help="Aim experiment name")
+  p.add_argument("--experiment", default=None, help="Aim experiment name (default: the method)")
   p.add_argument("--no-track", action="store_true", help="Disable Aim tracking")
   p.add_argument("--output-dir", type=Path, default=_REPO_ROOT / "ensemble/checkpoints")
   p.add_argument("--data-root", type=str, default=str(_REPO_ROOT / "data"))
   p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+  return p
 
-  ps = sub.add_parser("summarize", help="Aggregate a seed-replicate group into a summary run")
-  ps.add_argument("--experiment", required=True, help="Aim experiment name shared by the replicate runs")
-  ps.add_argument("--seeds", type=int, nargs="+", required=True, help="Joint seeds to aggregate")
-  ps.add_argument("--repo", type=str, default=None, help="Aim repo path (default: Aim's default repo)")
 
-  args = parser.parse_args()
+def _communicative_args(p: argparse.ArgumentParser) -> None:
+  p.add_argument("--specialist-config", type=Path, default=None,
+                 help='JSON {"<index>": {early?, late?, encoder?, decoder?, inject?}} sparse '
+                      "per-specialist overrides, keyed by position in the resolved "
+                      "backbone list — only positions differing from --early/--late "
+                      "need an entry")
+  p.add_argument("--encoder", default="qkv", choices=sorted(ENCODERS),
+                 help="Encoder head architecture (default for all specialists)")
+  p.add_argument("--decoder", default="mlp", choices=sorted(DECODERS),
+                 help="Decoder head architecture (default for all specialists)")
+  p.add_argument("--value-dim", type=int, default=64)
+  p.add_argument("--patch", type=int, default=0,
+                 help="Patch size k over the late grid; one attention per k*k patch "
+                      "(1 = per-position, 0 = mean-pool to one message). Must tile "
+                      "both the late and early grids.")
+  p.add_argument("--attn", default="all", choices=sorted(MASKS), help="Which senders each receiver can attend to")
+  p.add_argument("--patch-attn", action="store_true",
+                 help="Per member attention across its own patches after the bus (needs --patch >= 1)")
 
-  if args.method == "summarize":
-    run = summarize_replicates(args.experiment, args.seeds, repo=args.repo)
-    print(f"[summarize] wrote summary run {run.hash} in experiment {args.experiment!r}")
-    return
 
-  backbone_paths = _resolve_backbone_paths(args.manifest, args.backbones)
-  if len(backbone_paths) < 2:
-    parser.error("need at least 2 backbones")
-
-  seed_everything(args.seed, args.deterministic)
-
-  cfg = TrainConfig(
-    epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
-    seed=args.seed, device=args.device,
-    patience=args.patience, member_loss=args.member_loss,
-  )
-
-  train_loader, val_loader, test_loader = make_loaders(
-    args.split_file, args.batch_size, args.data_root
-  )
+def _communicative_from_args(args: argparse.Namespace, backbone_paths: list[Path]) -> tuple[Orchestrator, dict]:
   specs = resolve_specialist_specs(backbone_paths, args, args.specialist_config)
-  orchestrator = build_communicative(
+  model = build_communicative(
     specs, args.key_dim, args.value_dim, args.num_classes, args.device, args.patch, args.attn,
     args.patch_attn,
   )
+  return model, {
+    "specialist_config": str(args.specialist_config) if args.specialist_config else None,
+    "encoder": args.encoder, "decoder": args.decoder,
+    "value_dim": args.value_dim, "patch": args.patch,
+    "attn": args.attn, "patch_attn": args.patch_attn,
+  }
+
+
+def _minimal_args(p: argparse.ArgumentParser) -> None:
+  p.add_argument("--mix", default="average", choices=sorted(MIXERS), help="How messages are mixed over members")
+  p.add_argument("--proj", type=int, default=None,
+                 help="Grid positions after each member's projection: the late grid size "
+                      "(identity init) or half of it (pair-average init). Omit for no projection.")
+  p.add_argument("--decoder", default="mlp", choices=("linear", "mlp"),
+                 help="mlp puts a GELU between the positions and channels maps")
+
+
+def _minimal_from_args(args: argparse.Namespace, backbone_paths: list[Path]) -> tuple[Orchestrator, dict]:
+  model = build_minimal_communicative(
+    backbone_paths, args.early, args.late, args.inject, args.mix, args.proj, args.decoder,
+    args.key_dim, args.num_classes, args.device,
+  )
+  return model, {"mix": args.mix, "proj": args.proj, "decoder": args.decoder}
+
+
+# method -> (help, add its own arguments, build the model and its hparams from parsed args)
+METHODS: dict[str, tuple[str, Callable, Callable]] = {
+  "communicative": ("TarMAC-aligned communicative ensemble", _communicative_args, _communicative_from_args),
+  "minimal": ("Experiment 05: projected late maps mixed by average, gate or attention",
+              _minimal_args, _minimal_from_args),
+}
+
+
+def fit(
+  model: Orchestrator,
+  args: argparse.Namespace,
+  cfg: TrainConfig,
+  loaders: tuple[DataLoader, DataLoader, DataLoader],
+  backbone_paths: list[Path],
+  method_hparams: dict,
+) -> None:
+  """Freeze, measure the untrained baseline, train, evaluate and save. The
+  same for every method; method_hparams is what that method adds to the run."""
+  train_loader, val_loader, test_loader = loaders
   if args.freeze_fc:
-    for s in orchestrator.specialists:
+    for s in model.specialists:
       assert isinstance(s, Specialist)
       s.driver.backbone.fc.requires_grad_(False)
-  for s in orchestrator.specialists:
+  for s in model.specialists:
     assert isinstance(s, Specialist)
     for name in args.unfreeze:
       s.driver.backbone.get_submodule(name).requires_grad_(True)
-  n_trainable = sum(p.numel() for p in orchestrator.parameters() if p.requires_grad)
-  print(f"[communicative] {len(backbone_paths)} backbones  k_rounds={args.k_rounds}  "
+  n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+  print(f"[{args.method}] {len(backbone_paths)} backbones  k_rounds={args.k_rounds}  "
         f"trainable params={n_trainable:,}")
 
   # the orchestrator readout is log of prob-averaged member softmaxes, so the
@@ -915,39 +993,37 @@ def main() -> None:
   # plain mean over the frozen backbones' softmaxes — communication switched off)
   baseline = {}
   for name, loader in (("val", val_loader), ("test", test_loader)):
-    res = evaluate(orchestrator, loader, device=args.device, criterion=criterion, k_rounds=0)
+    res = evaluate(model, loader, device=args.device, criterion=criterion, k_rounds=0)
     baseline.update({f"{name}_{k}": v for k, v in res.items()})
   print(f"[baseline avg-probs] {baseline}")
 
+  hparams = {
+    **asdict(cfg),
+    "method": args.method,
+    "backbones": [str(p) for p in backbone_paths],
+    "manifest": str(args.manifest) if args.manifest else None,
+    "split_file": str(args.split_file),
+    "early": args.early, "late": args.late, "inject": args.inject,
+    "key_dim": args.key_dim, "k_rounds": args.k_rounds,
+    "batch_size": args.batch_size,
+    "deterministic": args.deterministic,
+    "freeze_fc": args.freeze_fc, "unfreeze": args.unfreeze,
+    **method_hparams,
+  }
   run = None
   if not args.no_track:
     run = Run(experiment=args.experiment)
-    run["hparams"] = {
-      **asdict(cfg),
-      "method": "communicative",
-      "backbones": [str(p) for p in backbone_paths],
-      "manifest": str(args.manifest) if args.manifest else None,
-      "specialist_config": str(args.specialist_config) if args.specialist_config else None,
-      "split_file": str(args.split_file),
-      "early": args.early, "late": args.late,
-      "encoder": args.encoder, "decoder": args.decoder, "inject": args.inject,
-      "key_dim": args.key_dim, "value_dim": args.value_dim,
-      "k_rounds": args.k_rounds, "patch": args.patch,
-      "batch_size": args.batch_size,
-      "deterministic": args.deterministic,
-      "freeze_fc": args.freeze_fc,
-      "attn": args.attn, "patch_attn": args.patch_attn, "unfreeze": args.unfreeze,
-    }
+    run["hparams"] = hparams
     run["baseline_avg_probs"] = baseline
     run["metric_docs"] = metric_docs.as_dict()
     print(f"aim run hash: {run.hash}")
 
   optimizer = torch.optim.AdamW(
-    (p for p in orchestrator.parameters() if p.requires_grad),
+    (p for p in model.parameters() if p.requires_grad),
     lr=cfg.lr, weight_decay=cfg.weight_decay,
   )
   job = TrainJob(
-    model=orchestrator, loader=train_loader, optimizer=optimizer,
+    model=model, loader=train_loader, optimizer=optimizer,
     criterion=criterion, config=cfg, run=run, val_loader=val_loader,
   )
   train(job, k_rounds=args.k_rounds)
@@ -957,7 +1033,7 @@ def main() -> None:
   results = {}
   for name, loader in (("val", val_loader), ("test", test_loader)):
     results[name] = evaluate(
-      orchestrator, loader, device=cfg.device, criterion=criterion, k_rounds=args.k_rounds
+      model, loader, device=cfg.device, criterion=criterion, k_rounds=args.k_rounds
     )
     print(f"{name}: {results[name]}")
     if run is not None:
@@ -975,23 +1051,53 @@ def main() -> None:
   out = args.output_dir / args.experiment / f"seed{args.seed}.pt"
   out.parent.mkdir(parents=True, exist_ok=True)
   torch.save({
-    "state_dict": orchestrator.state_dict(),
+    "state_dict": model.state_dict(),
     "metadata": {
-      "method": "communicative",
-      "backbones": [str(p) for p in backbone_paths],
-      "split_file": str(args.split_file),
-      "early": args.early, "late": args.late,
-      "encoder": args.encoder, "decoder": args.decoder, "inject": args.inject,
-      "key_dim": args.key_dim, "value_dim": args.value_dim,
-      "k_rounds": args.k_rounds, "patch": args.patch,
-      "freeze_fc": args.freeze_fc, "best_epoch": job.best_epoch,
-      "attn": args.attn, "patch_attn": args.patch_attn, "unfreeze": args.unfreeze,
+      **hparams,
+      "best_epoch": job.best_epoch,
       "baseline_avg_probs": baseline,
       **final_flat,
-      **asdict(cfg),
     },
   }, out)
   print(f"saved → {out}")
+
+
+def main() -> None:
+  parser = argparse.ArgumentParser(description="Train an ensemble over frozen backbones")
+  sub = parser.add_subparsers(dest="method", required=True)
+
+  common = _common_args()
+  for method, (help_text, add_args, _) in METHODS.items():
+    add_args(sub.add_parser(method, help=help_text, parents=[common]))
+
+  ps = sub.add_parser("summarize", help="Aggregate a seed-replicate group into a summary run")
+  ps.add_argument("--experiment", required=True, help="Aim experiment name shared by the replicate runs")
+  ps.add_argument("--seeds", type=int, nargs="+", required=True, help="Joint seeds to aggregate")
+  ps.add_argument("--repo", type=str, default=None, help="Aim repo path (default: Aim's default repo)")
+
+  args = parser.parse_args()
+
+  if args.method == "summarize":
+    run = summarize_replicates(args.experiment, args.seeds, repo=args.repo)
+    print(f"[summarize] wrote summary run {run.hash} in experiment {args.experiment!r}")
+    return
+
+  args.experiment = args.experiment or args.method
+  backbone_paths = _resolve_backbone_paths(args.manifest, args.backbones)
+  if len(backbone_paths) < 2:
+    parser.error("need at least 2 backbones")
+
+  seed_everything(args.seed, args.deterministic)
+
+  cfg = TrainConfig(
+    epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
+    seed=args.seed, device=args.device,
+    patience=args.patience, member_loss=args.member_loss,
+  )
+
+  loaders = make_loaders(args.split_file, args.batch_size, args.data_root)
+  model, method_hparams = METHODS[args.method][2](args, backbone_paths)
+  fit(model, args, cfg, loaders, backbone_paths, method_hparams)
 
 
 if __name__ == "__main__":

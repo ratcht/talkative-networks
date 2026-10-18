@@ -137,3 +137,98 @@ class PatchAttention(nn.Module):
 
   def forward(self, x: t.Tensor) -> tuple[t.Tensor, t.Tensor]:
     return self.bus(*self.encoder(x))  # (b, p, d), (b, p, p)
+
+
+# ==== 05_minimal_exchange ====
+# A member's message is its own late map, rows = channels, columns = grid
+# positions, with no value head. Members are mixed by average, gate or
+# attention, and the mix is decoded positions first, then channels.
+
+def pair_average(positions: int) -> t.Tensor:
+  """(positions // 2, positions) map averaging each pair of horizontally
+  adjacent cells of a row-major grid with even width."""
+  w = t.zeros(positions // 2, positions)
+  rows = t.arange(positions // 2)
+  w[rows, 2 * rows] = 0.5
+  w[rows, 2 * rows + 1] = 0.5
+  return w
+
+
+def position_projection(positions: int, out: int | None) -> nn.Module:
+  """Learned map over grid positions, shared by all channels. Starts as a
+  fixed spatial operation: identity when out == positions, pair averaging when
+  out == positions // 2. None means no projection."""
+  if out is None:
+    return nn.Identity()
+  proj = nn.Linear(positions, out, bias=False)
+  with t.no_grad():
+    if out == positions:
+      proj.weight.copy_(t.eye(positions))
+    elif 2 * out == positions:
+      proj.weight.copy_(pair_average(positions))
+    else:
+      raise ValueError(f"projection {positions} -> {out} has no init, use {positions} or {positions // 2}")
+  return proj
+
+
+class MinimalEncoder(nn.Module):
+  """Sends its projected late map, flattened, as the value. The heads it owns
+  depend on the mix: query and key for attention, one score for the gate,
+  none for the average."""
+  def __init__(self, channels: int, positions: int, proj: int | None, mix: str, key_dim: int):
+    super().__init__()
+    self.proj = position_projection(positions, proj)
+    dim = channels * (proj or positions)
+    self.query_head = nn.Linear(dim, key_dim) if mix == "attention" else None
+    self.key_head = nn.Linear(dim, key_dim) if mix == "attention" else None
+    self.score_head = nn.Linear(dim, 1) if mix == "gate" else None
+    if self.score_head is not None:
+      # uniform gate at step 0, so the gate arm starts as the average arm
+      nn.init.zeros_(self.score_head.weight)
+      nn.init.zeros_(self.score_head.bias)
+
+  def forward(self, x) -> tuple[t.Tensor | None, t.Tensor | None, t.Tensor]:
+    v = self.proj(x.flatten(2)).flatten(1).unsqueeze(1)  # (b, 1, c * s)
+    if self.score_head is not None:
+      return None, self.score_head(v), v
+    if self.query_head is not None:
+      return self.query_head(v), self.key_head(v), v
+    return None, None, v
+
+
+class MinimalDecoder(nn.Module):
+  """(b, 1, in_ch * s) -> (b, out_ch, h, w). Maps positions s -> h * w, then
+  channels in_ch -> out_ch. hidden puts a GELU between the two."""
+  def __init__(self, in_ch: int, s: int, out_ch: int, out_hw: tuple[int, int],
+               hidden: bool, zero_init: bool):
+    super().__init__()
+    self.in_ch = in_ch
+    self.out_hw = out_hw
+    self.positions = nn.Linear(s, out_hw[0] * out_hw[1])
+    self.act = nn.GELU() if hidden else nn.Identity()
+    self.channels = nn.Linear(in_ch, out_ch)
+    if zero_init:
+      nn.init.zeros_(self.channels.weight)
+      nn.init.zeros_(self.channels.bias)
+
+  def forward(self, x):
+    x = x.squeeze(1).unflatten(-1, (self.in_ch, -1))  # (b, in_ch, s)
+    x = self.act(self.positions(x))                   # (b, in_ch, h * w)
+    x = self.channels(x.transpose(1, 2))              # (b, h * w, out_ch)
+    return x.transpose(1, 2).unflatten(-1, self.out_hw)
+
+
+class AverageBus(nn.Module):
+  """Every receiver gets the plain mean over members. No weights to report."""
+  def forward(self, Q, K, V: t.Tensor) -> tuple[t.Tensor, None]:
+    return V.mean(dim=-2, keepdim=True).expand_as(V), None
+
+
+class GateBus(nn.Module):
+  """Softmax over one score per sender. Every receiver gets the same mix, so
+  every row of the reported (b, p, n, n) weights is the gate."""
+  def forward(self, Q, K: t.Tensor, V: t.Tensor) -> tuple[t.Tensor, t.Tensor]:
+    g = K.squeeze(-1).softmax(dim=-1)  # (b, p, n)
+    n = g.shape[-1]
+    attn = g.unsqueeze(-2).expand(*g.shape[:-1], n, n)  # (b, p, n, n)
+    return attn @ V, attn

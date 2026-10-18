@@ -114,6 +114,20 @@ Tracked with no context — one series.
 
 Tracked with no context — one series.
 
+#### `mix_weight`
+
+**Summary.** Mean weight each sender gets in the mix, over receivers, patches and the batch.
+
+**Computation.** _track_mix_weights(): last_attn (b, p, n, n), receiver-major, meaned over every dim but the sender. One series per sender. Not tracked when the bus reports no weights (minimal --mix average).
+
+**Intent.** Which members the mix relies on. 1/n for every sender is a uniform mix; one sender near 1 means the others are ignored. For the gate every receiver has the same weights, so this is the gate itself.
+
+**Context — `sender`.** This name covers several series, one per value:
+
+| `sender` value | meaning |
+|---|---|
+| `<j>` | the member whose message the weight is on, by position in the backbone list. |
+
 #### `msg_norm`
 
 **Summary.** Mean L2 norm of communication-round tensors, split by pipeline stage.
@@ -162,6 +176,16 @@ Tracked with no context — one series.
 **Computation.** routing_counts() takes attn.argmax(-1) over the bus's (b, p, n, n) attention and counts how often a receiver's peak lands on its own index, over all receivers, patches and examples in the batch. Tracked per step on train batches and per epoch over the full val set (val_self_attn_rate).
 
 **Intent.** TarMACBus lets every member attend over all members including itself, so a receiver can route to its own message. High self-attention means communication is largely not happening — the receiver is reading itself back. It is also the confound that makes routed_correct's corrected split circular, which is why routed_correct excludes these pairs.
+
+Tracked with no context — one series.
+
+#### `self_weight`
+
+**Summary.** Mean weight a receiver puts on its own message.
+
+**Computation.** _track_mix_weights(): the diagonal of last_attn (b, p, n, n), meaned over receivers, patches and the batch.
+
+**Intent.** The soft version of self_attn_rate: how much of what a receiver hears is itself, not just whether it is the largest share. 1/n is uniform.
 
 Tracked with no context — one series.
 
@@ -313,6 +337,8 @@ Whether optimization itself is healthy — orthogonal to whether communication h
 | `query_head` | the receiver projection in a specialist's QKVEncoder. Only receives gradient through the attention softmax, so it's the earliest warning if attention saturates and stops passing gradient back. |
 | `key_head` | the signature projection in a specialist's QKVEncoder. Same softmax-only gradient path as query_head — the two are the first components to go quiet. |
 | `value_head` | the sender projection in a specialist's QKVEncoder — what gets broadcast as a message. |
+| `score_head` | the gate score in a specialist's MinimalEncoder (minimal, --mix gate): one number per sender, softmaxed over members. |
+| `proj` | the projection over grid positions in a specialist's MinimalEncoder (minimal, --proj). |
 | `decoder` | the network (--decoder mlp or linear) that turns an aggregated message into an injection back into the backbone. |
 | `fc` | the backbone's own classification head — the one part of the otherwise-frozen backbone left trainable. |
 | `trunk` | the shared MLP trunk before it diverges into query/key/value heads. Present for --encoder mlp (Linear->GELU->LayerNorm) and --encoder mlp_no_ln (Linear->GELU, no LayerNorm) — not for qkv, which has no shared trunk at all. |
@@ -349,6 +375,8 @@ Whether optimization itself is healthy — orthogonal to whether communication h
 | `query_head` | the receiver projection in a specialist's QKVEncoder. Only receives gradient through the attention softmax, so it's the earliest warning if attention saturates and stops passing gradient back. |
 | `key_head` | the signature projection in a specialist's QKVEncoder. Same softmax-only gradient path as query_head — the two are the first components to go quiet. |
 | `value_head` | the sender projection in a specialist's QKVEncoder — what gets broadcast as a message. |
+| `score_head` | the gate score in a specialist's MinimalEncoder (minimal, --mix gate): one number per sender, softmaxed over members. |
+| `proj` | the projection over grid positions in a specialist's MinimalEncoder (minimal, --proj). |
 | `decoder` | the network (--decoder mlp or linear) that turns an aggregated message into an injection back into the backbone. |
 | `fc` | the backbone's own classification head — the one part of the otherwise-frozen backbone left trainable. |
 | `trunk` | the shared MLP trunk before it diverges into query/key/value heads. Present for --encoder mlp (Linear->GELU->LayerNorm) and --encoder mlp_no_ln (Linear->GELU, no LayerNorm) — not for qkv, which has no shared trunk at all. |
