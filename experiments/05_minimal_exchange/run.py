@@ -21,8 +21,14 @@ SEEDS = 3
 EPOCHS = 150  # a cap, not a target: patience stops arms that have converged
 PATIENCE = 10
 
-# arm grid. proj None = no projection, else grid positions after it (64 of 8 x 8)
-MIXES = ("average", "gate", "attention")
+# arm grid. proj None = no projection, else grid positions after it (64 of 8 x 8).
+# arm label -> (mix, zero_query). attention_zq starts the query heads at zero (uniform start)
+MIXES = {
+  "average": ("average", False),
+  "gate": ("gate", False),
+  "attention": ("attention", False),
+  "attention_zq": ("attention", True),
+}
 PROJS = (None, 64, 32)
 DECODERS = ("linear", "mlp")
 INJECTS = ("add", "replace")
@@ -30,13 +36,14 @@ INJECTS = ("add", "replace")
 
 def arms() -> dict[str, dict]:
   out = {}
-  for mix, proj, dec, inject in product(MIXES, PROJS, DECODERS, INJECTS):
-    name = f"{mix}_{'none' if proj is None else f'p{proj}'}_{dec}_{inject}"
-    out[name] = dict(mix=mix, proj=proj, decoder=dec, inject=inject)
+  for label, proj, dec, inject in product(MIXES, PROJS, DECODERS, INJECTS):
+    mix, zero_query = MIXES[label]
+    name = f"{label}_{'none' if proj is None else f'p{proj}'}_{dec}_{inject}"
+    out[name] = dict(mix=mix, zero_query=zero_query, proj=proj, decoder=dec, inject=inject)
   return out
 
 
-def command(name: str, mix: str, proj: int | None, decoder: str, inject: str) -> list[str]:
+def command(name: str, mix: str, zero_query: bool, proj: int | None, decoder: str, inject: str) -> list[str]:
   return [
     sys.executable, "scripts/replicate_joint.py",
     "--split-file", SPLIT_FILE,
@@ -47,6 +54,7 @@ def command(name: str, mix: str, proj: int | None, decoder: str, inject: str) ->
     "minimal",
     "--manifest", MANIFEST,
     "--mix", mix,
+    *(["--zero-query"] if zero_query else []),
     *(["--proj", str(proj)] if proj is not None else []),
     "--decoder", decoder,
     "--inject", inject,

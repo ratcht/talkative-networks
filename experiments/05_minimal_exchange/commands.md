@@ -8,7 +8,7 @@ Run from the repo root on the lab machine.
 git fetch && git checkout comm-experiments && git pull
 ```
 
-## 2. Start all 36 arms in a screen, logging to run.log
+## 2. Start all 48 arms in a screen, logging to run.log
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 screen -S mexch -L -Logfile experiments/05_minimal_exchange/run.log uv run python experiments/05_minimal_exchange/run.py

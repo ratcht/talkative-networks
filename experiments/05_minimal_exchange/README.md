@@ -4,6 +4,8 @@
 
 How much does the way members are mixed matter? Messages are mixed by a plain average, a learned gate (like an MoE router), or attention. Everything else in the pipeline is the same, so the arms differ only in the mixing.
 
+Attention is run twice: with standard init, which starts far from uniform, and with the query heads started at zero (`attention_zq`), which starts as the average, like the gate. This separates what attention learns from where it starts.
+
 ## Words used below
 
 | Word | Meaning |
@@ -82,7 +84,8 @@ Average and gate give **every receiver the same message**. Only the receivers' d
   2. A_i = softmax over j of (q_i · k_j / √d_k). Receiver i's three weights, self included, summing to 1.
   3. message_i = A_i1·x₁ + A_i2·x₂ + A_i3·x₃
   4. No value map: the message is made of the projected states x_j themselves, as in average and gate.
-  5. W_q, W_k: standard init (PyTorch `nn.Linear`).
+  5. W_q, W_k: standard init (PyTorch `nn.Linear`). The layer3.0 features are not normalized, so this start is far from uniform (e.g. 0.79 / 0.19 / 0.02).
+  6. attention_zq arms: same, but W_q starts at zero. Every score is then 0, so attention starts as the average, like the gate. The random keys still give W_q a gradient.
 
 Attention is the gate with one difference: **each receiver gets its own weights**, so each receiver gets its own message.
 
@@ -105,8 +108,11 @@ Init:
 | average | none, 64→64, 64→32 | linear, MLP | additive, replace | 12 |
 | gate | none, 64→64, 64→32 | linear, MLP | additive, replace | 12 |
 | attention | none, 64→64, 64→32 | linear, MLP | additive, replace | 12 |
+| attention_zq | none, 64→64, 64→32 | linear, MLP | additive, replace | 12 |
 
-36 arms × 3 seeds = 108 runs.
+48 arms × 3 seeds = 144 runs.
+
+Attention arms have about 3× the trainable parameters of the others (about 600k vs 110k to 230k): each member's query and key heads read the whole flattened map.
 
 ## Training setup (same as experiment 04)
 
@@ -141,6 +147,6 @@ Experiments 04 and 05 both keep `layer3.0` → `layer1.2` so they can be compare
 
 - `bus.py`, block `05_minimal_exchange`: `MinimalEncoder` (position projection, per-member gate or query/key heads), `MinimalDecoder` (positions map, optional GELU, channels map), `AverageBus`, `GateBus`. Attention reuses `TarMACBus`.
 - `orchestrator.py`: encoders may return no Q/K, and buses may return no weights (average). Attention stats are skipped when there are no weights.
-- `train.py`: new subcommand `minimal` (`--mix`, `--proj`, `--decoder linear|mlp`), built by `build_minimal_communicative`. Arguments shared by all methods and the train/evaluate/save step were extracted so both subcommands use them.
+- `train.py`: new subcommand `minimal` (`--mix`, `--proj`, `--decoder linear|mlp`, `--zero-query`), built by `build_minimal_communicative`. Arguments shared by all methods and the train/evaluate/save step were extracted so both subcommands use them.
 - `train.py` logging: `mix_weight` per sender and `self_weight` for any bus that reports weights (gate, attention). `proj` and `score_head` get their own `grad_norm` component. Replace uses `INJECTIONS["replace"]` from experiment 04.
 - `experiments/05_minimal_exchange/`: `run.py`, `commands.md`.
