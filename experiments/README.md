@@ -8,6 +8,7 @@ One folder per experiment, numbered in the order they were run.
 | 01 | [multiplicative_injection](01_multiplicative_injection/README.md) | done (film_p2: 3 of 4 seeds) |
 | 02 | [overfitting](02_overfitting/README.md) | done |
 | 03 | [attention_masking](03_attention_masking/README.md) | done (k0_unfreeze failed) |
+| 04 | [patch_attention](04_patch_attention/README.md) | done |
 
 ## Layout
 

@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "config": {
+    "trailing": [
+      "communicative",
+      "--manifest",
+      "selection/manifests/encoder_study_group.json",
+      "--encoder",
+      "qkv_eye",
+      "--value-dim",
+      "256",
+      "--epochs",
+      "70",
+      "--patience",
+      "10",
+      "--freeze-fc",
+      "--output-dir",
+      "experiments/04_patch_attention/checkpoints",
+      "--patch",
+      "2",
+      "--decoder",
+      "mlp",
+      "--inject",
+      "replace",
+      "--patch-attn"
+    ],
+    "experiment": "pa_p2_mlp_replace_pattn",
+    "split_digest": "c6f2c9ce5e2f61af"
+  },
+  "seeds": {
+    "476981973": {
+      "status": "done",
+      "finished": "2026-10-17T05:43:59+00:00",
+      "elapsed_sec": 375.4
+    },
+    "621715752": {
+      "status": "done",
+      "finished": "2026-10-17T05:54:36+00:00",
+      "elapsed_sec": 637.6
+    },
+    "1882162633": {
+      "status": "done",
+      "finished": "2026-10-17T06:03:25+00:00",
+      "elapsed_sec": 528.4
+    }
+  }
+}
