@@ -796,6 +796,7 @@ def build_minimal_communicative(
   key_dim: int,
   num_classes: int,
   device: str,
+  zero_query: bool = False,
 ) -> Orchestrator:
   injection = INJECTIONS[inject]
   specialists = []
@@ -807,7 +808,7 @@ def build_minimal_communicative(
       Driver(model, early, late),
       MinimalDecoder(late_ch, s, injection.width * early_ch, (eh, ew),
                      hidden=decoder == "mlp", zero_init=injection.zero_init),
-      MinimalEncoder(late_ch, lh * lw, proj, mix, key_dim),
+      MinimalEncoder(late_ch, lh * lw, proj, mix, key_dim, zero_query),
       injection,
     ))
   return Orchestrator(specialists, MIXERS[mix](len(specialists)), key_dim, late_ch * s, num_classes).to(device)
@@ -944,14 +945,16 @@ def _minimal_args(p: argparse.ArgumentParser) -> None:
                       "(identity init) or half of it (pair-average init). Omit for no projection.")
   p.add_argument("--decoder", default="mlp", choices=("linear", "mlp"),
                  help="mlp puts a GELU between the positions and channels maps")
+  p.add_argument("--zero-query", action="store_true",
+                 help="Start the query heads at zero so attention starts uniform (needs --mix attention)")
 
 
 def _minimal_from_args(args: argparse.Namespace, backbone_paths: list[Path]) -> tuple[Orchestrator, dict]:
   model = build_minimal_communicative(
     backbone_paths, args.early, args.late, args.inject, args.mix, args.proj, args.decoder,
-    args.key_dim, args.num_classes, args.device,
+    args.key_dim, args.num_classes, args.device, args.zero_query,
   )
-  return model, {"mix": args.mix, "proj": args.proj, "decoder": args.decoder}
+  return model, {"mix": args.mix, "proj": args.proj, "decoder": args.decoder, "zero_query": args.zero_query}
 
 
 # method -> (help, add its own arguments, build the model and its hparams from parsed args)

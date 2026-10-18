@@ -174,8 +174,9 @@ def position_projection(positions: int, out: int | None) -> nn.Module:
 class MinimalEncoder(nn.Module):
   """Sends its projected late map, flattened, as the value. The heads it owns
   depend on the mix: query and key for attention, one score for the gate,
-  none for the average."""
-  def __init__(self, channels: int, positions: int, proj: int | None, mix: str, key_dim: int):
+  none for the average. zero_query starts attention uniform, like the gate."""
+  def __init__(self, channels: int, positions: int, proj: int | None, mix: str, key_dim: int,
+               zero_query: bool = False):
     super().__init__()
     self.proj = position_projection(positions, proj)
     dim = channels * (proj or positions)
@@ -186,6 +187,12 @@ class MinimalEncoder(nn.Module):
       # uniform gate at step 0, so the gate arm starts as the average arm
       nn.init.zeros_(self.score_head.weight)
       nn.init.zeros_(self.score_head.bias)
+    if zero_query:
+      assert self.query_head is not None, "zero_query needs mix attention"
+      # q = 0 makes every score 0, so attention starts as the average. The
+      # random keys still give the query head a gradient
+      nn.init.zeros_(self.query_head.weight)
+      nn.init.zeros_(self.query_head.bias)
 
   def forward(self, x) -> tuple[t.Tensor | None, t.Tensor | None, t.Tensor]:
     v = self.proj(x.flatten(2)).flatten(1).unsqueeze(1)  # (b, 1, c * s)
