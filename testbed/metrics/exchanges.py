@@ -3,7 +3,8 @@ Metrics on one exchange: what the experts sent, how the mixer weighted it, and
 what the decoders injected. Definitions: docs/testbed/metrics.md.
 
 An ExchangeMeter reads one exchange's traces batch by batch over a full pass
-of joint_val. Messages and mixing weights are small, so it keeps them whole.
+of joint_val. Messages, mixing weights and, for a backward round, the experts'
+answers after the round are small, so it keeps them whole.
 Injections are feature maps, so it reduces each batch of them to running sums
 as it arrives; the statistics are still exact over the whole split.
 """
@@ -12,6 +13,7 @@ import torch
 from torch.special import xlogy
 
 from testbed.communication.ensemble import Trace
+from testbed.metrics.answers import answer_grid
 
 # An injection with a smaller norm counts as zero. Every channel starts there,
 # since the decoders' last layers are zero-initialised.
@@ -26,6 +28,7 @@ class ExchangeMeter:
     self.values: list[torch.Tensor] = []
     self.received: list[torch.Tensor] = []
     self.weights: list[torch.Tensor] = []
+    self.answers: list[torch.Tensor] = []
     self.injections: list[InjectionSums] = []
 
   def add(self, trace: Trace) -> None:
@@ -33,6 +36,8 @@ class ExchangeMeter:
     self.received.append(trace.reading.received)
     if trace.reading.weights is not None:
       self.weights.append(per_expert(trace.reading.weights))
+    if trace.answers is not None:
+      self.answers.append(trace.answers)
     if not self.injections:
       self.injections = [InjectionSums() for _ in trace.injection]
     for sums, injection in zip(self.injections, trace.injection):
@@ -59,6 +64,9 @@ class ExchangeMeter:
       out["inj_resid_frac"] = mean(i["resid_frac"] for i in injections)
       out["inj_rank"] = mean(i["rank"] for i in injections)
     out |= message_ranks(values, received)
+    if self.answers:  # a backward round: the grid as it stands after this round
+      grid = answer_grid(torch.cat(self.answers), y)
+      out |= {f"answer_grid/{cell}": v for cell, v in grid.items()}
     if not self.weights:  # a mixer without weights has no routing to read
       return out, None
     weights = torch.cat(self.weights)

@@ -43,9 +43,11 @@ class Trace:
   exchange: int  # index into the ensemble's exchanges, and so its channels
   round: int | None  # which round of a backward exchange; None for forward
   reading: Reading
-  injection: list[
-    torch.Tensor
-  ]  # per expert, shaped like its features at the write point
+  # per expert, shaped like its features at the write point
+  injection: list[torch.Tensor]
+  # (B, M, classes): the experts' answers had communication stopped after this
+  # round. Backward rounds only, and only when the forward pass is asked for them.
+  answers: torch.Tensor | None = None
 
   @property
   def site(self) -> str:
@@ -124,9 +126,14 @@ class CommunicatingEnsemble(nn.Module):
     self.experts.eval()  # frozen experts never leave eval mode
     return self
 
-  def forward(self, x: torch.Tensor) -> Output:
-    run = self._backward if self.direction == "backward" else self._forward
-    logits, traces = run(x)
+  def forward(self, x: torch.Tensor, answer_each_round: bool = False) -> Output:
+    """With answer_each_round, a backward exchange also records the experts'
+    answers after every round, for the metrics. That costs one pass of the
+    stages after the read point per round, so training leaves it off."""
+    if self.direction == "backward":
+      logits, traces = self._backward(x, answer_each_round)
+    else:
+      logits, traces = self._forward(x)
     return Output(average(logits), logits, traces)
 
   def bagging(self, x: torch.Tensor) -> Output:
@@ -151,7 +158,9 @@ class CommunicatingEnsemble(nn.Module):
           readings[i] = self.channels[i].read(features)
     return torch.stack(features, dim=1), traces
 
-  def _backward(self, x: torch.Tensor) -> tuple[torch.Tensor, list[Trace]]:
+  def _backward(
+    self, x: torch.Tensor, answer_each_round: bool = False
+  ) -> tuple[torch.Tensor, list[Trace]]:
     """A perception pass, then K rounds of: read late, write early, re-run the stages between."""
     (ex,) = self.exchanges
     (channel,) = self.channels
@@ -169,11 +178,16 @@ class CommunicatingEnsemble(nn.Module):
         expert.run(f + d, after=ex.write, until=ex.read)
         for expert, f, d in zip(self.experts, early, injection)
       ]
-      traces.append(Trace(0, r, reading, injection))
-    logits = torch.stack(
-      [expert.run(f, after=ex.read) for expert, f in zip(self.experts, late)], dim=1
-    )
+      answers = self._answer(late, ex.read) if answer_each_round else None
+      traces.append(Trace(0, r, reading, injection, answers))
+    logits = traces[-1].answers if answer_each_round else self._answer(late, ex.read)
     return logits, traces
+
+  def _answer(self, features: list[torch.Tensor], after: str) -> torch.Tensor:
+    """(B, M, classes): each expert's answer, running its features on from point `after`."""
+    return torch.stack(
+      [expert.run(f, after=after) for expert, f in zip(self.experts, features)], dim=1
+    )
 
 
 def build_ensemble(

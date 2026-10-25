@@ -6,9 +6,11 @@ The loss is still an open choice (docs/docket.md):
   per_expert   mean of each expert's own cross-entropy
 
 Every metric in docs/testbed/metrics.md is logged at step 0, before any
-training, and again after every epoch:
-  train      over the epoch's batches, as the channel was at each batch
-  joint_val  a full pass after the epoch, with every exchange's metrics
+training, and again after every epoch, under the split it was measured on:
+  joint      the split the channel trains on, over the epoch's batches, as
+             the channel was at each batch
+  joint_val  a full pass after the epoch, with every exchange's metrics and,
+             for a backward exchange, the answers after each round
   test       a full pass after the epoch
 Nothing here selects on test. Which epoch a run is scored at is decided
 afterwards, from joint_val (docs/docket.md).
@@ -16,6 +18,7 @@ afterwards, from joint_val (docs/docket.md).
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -26,6 +29,7 @@ from testbed.metrics import (
   ExchangeMeter,
   OptimisationMeter,
   accuracy,
+  answer_grid,
   answer_shift_kl,
   expert_accuracy,
   joint_answer_shift,
@@ -94,13 +98,14 @@ def train(
       optimisation.after_step()
       logits.append(out.logits.detach())
     post, y = torch.cat(logits), data.joint.y[order]
-    train_metrics = prefix(
-      "train",
+    joint_metrics = prefix(
+      "joint",
       {"loss": loss_fn(post, y, config.loss).item(), "accuracy": accuracy(post, y)}
+      | prefix("answer_grid", answer_grid(post, y))
       | prefix("joint_answer_shift", joint_answer_shift(pre["joint"][order], post, y)),
     )
     log(
-      train_metrics
+      joint_metrics
       | optimisation.result()
       | evaluate(model, data, pre, config.loss, routes)
     )
@@ -120,12 +125,16 @@ def evaluate(
   out = {}
   for split in ("joint_val", "test"):
     x, y = getattr(data, split).x, getattr(data, split).y
-    post, meters = predict(model, x, measure=split == "joint_val")
+    measure = split == "joint_val"
+    run = partial(model, answer_each_round=True) if measure else model
+    post, meters = predict(run, x, measure)
     metrics = {
       "loss": loss_fn(post, y, loss).item(),
       "accuracy": accuracy(post, y),
       "expert_accuracy": expert_accuracy(post, y),
-    } | prefix("joint_answer_shift", joint_answer_shift(pre[split], post, y))
+    }
+    metrics |= prefix("answer_grid", answer_grid(post, y))
+    metrics |= prefix("joint_answer_shift", joint_answer_shift(pre[split], post, y))
     if split == "joint_val":
       metrics |= prefix(
         "marginal_answer_shift", marginal_answer_shift(pre[split], post, y)

@@ -19,6 +19,8 @@ from testbed.communication.ensemble import average
 from testbed.data import REPO_ROOT
 from testbed.metrics import (
   METRICS,
+  accuracy,
+  answer_grid,
   joint_answer_shift,
   marginal_answer_shift,
 )
@@ -29,6 +31,13 @@ from testbed.metrics.registry import find
 from testbed.train import JointConfig, loss_fn, train
 
 DOCS = REPO_ROOT / "docs" / "testbed" / "metrics.md"
+CELLS = (
+  "all_right",
+  "some_right_avg_right",
+  "some_right_avg_wrong",
+  "none_right_avg_right",
+  "none_right_avg_wrong",
+)
 
 
 def logits(n=500, m=3, classes=10, seed=0):
@@ -37,6 +46,66 @@ def logits(n=500, m=3, classes=10, seed=0):
     torch.randn(n, m, classes, generator=gen),
     torch.randint(0, classes, (n,), generator=gen),
   )
+
+
+def test_answer_grid_by_construction():
+  # two experts, three classes, the true class is 0; one example per cell
+  probs = torch.tensor(
+    [
+      [[0.8, 0.1, 0.1], [0.7, 0.2, 0.1]],  # both right
+      [[0.8, 0.1, 0.1], [0.3, 0.6, 0.1]],  # one right, and the average is
+      [[0.4, 0.3, 0.3], [0.1, 0.8, 0.1]],  # one right, but the average isn't
+      [[0.44, 0.55, 0.01], [0.44, 0.01, 0.55]],  # neither right, the average is
+      [[0.1, 0.8, 0.1], [0.1, 0.7, 0.2]],  # neither right, nor the average
+    ]
+  )
+  grid = answer_grid(probs.log(), torch.zeros(5, dtype=torch.long))
+  assert grid == pytest.approx(
+    {
+      "all_right": 0.2,
+      "some_right_avg_right": 0.2,
+      "some_right_avg_wrong": 0.2,
+      "none_right_avg_right": 0.2,
+      "none_right_avg_wrong": 0.2,
+    }
+  )
+
+
+def test_answer_grid_adds_up():
+  post, y = logits(m=4, seed=3)
+  grid = answer_grid(post, y)
+  assert sum(grid.values()) == pytest.approx(1)  # every example in one cell
+  avg_right = (
+    grid["all_right"] + grid["some_right_avg_right"] + grid["none_right_avg_right"]
+  )
+  assert avg_right == pytest.approx(accuracy(post, y))
+  some_expert_right = (post.argmax(-1) == y[:, None]).any(1).float().mean().item()
+  assert grid["all_right"] + grid["some_right_avg_right"] + grid[
+    "some_right_avg_wrong"
+  ] == pytest.approx(some_expert_right)
+
+
+def test_answering_each_round_changes_nothing_else():
+  gen = torch.Generator().manual_seed(0)
+  x = fake_data().joint_val.x
+  backward = build_ensemble(
+    random_experts(), [Exchange("stage3", "stage1")], ChannelConfig(), (1, 28, 28), 3, 0
+  )
+  with torch.no_grad():
+    for p in backward.channels.parameters():  # off zero, so the rounds differ
+      p.add_(0.1 * torch.randn(p.shape, generator=gen))
+    plain, each = backward(x), backward(x, answer_each_round=True)
+  assert torch.equal(plain.logits, each.logits)
+  assert all(t.answers is None for t in plain.traces)
+  assert [t.round for t in each.traces] == [0, 1, 2]
+  assert torch.equal(each.traces[-1].answers, each.logits)
+  assert not torch.equal(each.traces[0].answers, each.traces[-1].answers)
+
+  forward = build_ensemble(
+    random_experts(), [Exchange("stage1", "stage2")], ChannelConfig(), (1, 28, 28), 1, 0
+  )
+  with torch.no_grad():
+    assert all(t.answers is None for t in forward(x, answer_each_round=True).traces)
 
 
 def test_net_is_the_change_in_accuracy():
@@ -220,6 +289,42 @@ def run(request):
   return request.param, model, data, recorder, history
 
 
+def test_answer_grid_adds_up_to_accuracy_at_every_step(run):
+  _, _, _, _, history = run
+  for step in history:
+    for split in ("joint", "joint_val", "test"):
+      if f"{split}/accuracy" not in step:  # the joint split starts at step 1
+        continue
+      cell = {
+        key.rsplit("/", 1)[1]: v
+        for key, v in step.items()
+        if key.startswith(f"{split}/answer_grid/")
+      }
+      assert len(cell) == 5
+      assert sum(cell.values()) == pytest.approx(1)
+      assert cell["all_right"] + cell["some_right_avg_right"] + cell[
+        "none_right_avg_right"
+      ] == pytest.approx(step[f"{split}/accuracy"])
+
+
+def test_each_backward_round_has_its_own_grid(run):
+  arm, _, _, _, history = run
+  for step, metrics in enumerate(history):
+    sites = {key.split("/", 2)[2] for key in metrics if key.startswith("answer_grid/")}
+    if arm != "backward":
+      assert not sites  # forward exchanges have no grid of their own
+      continue
+    assert sites == {"ex0/round0", "ex0/round1"}
+    for site in sites:
+      grid = {cell: metrics[f"answer_grid/{cell}/{site}"] for cell in CELLS}
+      assert sum(grid.values()) == pytest.approx(1)
+      # the last round's answers are the ensemble's; at step 0 every round's are bagging's
+      if site.endswith("round1") or step == 0:
+        assert grid == {
+          cell: metrics[f"joint_val/answer_grid/{cell}"] for cell in CELLS
+        }
+
+
 def test_every_logged_key_is_in_the_registry(run):
   _, _, _, recorder, history = run
   assert [recorder.steps[s] for s in range(len(history))] == history
@@ -239,7 +344,7 @@ def test_step_zero_is_bagging(run):
   for key, value in first.items():
     if key.startswith(("msg_norm/injection", "inj_")):
       assert value == 0, key
-    assert not key.startswith(("train/", "route_flip_rate", "grad_norm")), key
+    assert not key.startswith(("joint/", "route_flip_rate", "grad_norm")), key
   assert len(history) == (1 if arm == "bagging" else 3)
 
 
@@ -251,7 +356,7 @@ def test_train_answers_line_up_with_their_examples(run):
     bagging = average(model.bagging(data.joint.x).logits).argmax(-1) == data.joint.y
   for step in history[1:]:
     # the epoch's examples are shuffled; pre must be shuffled with them
-    assert step["train/joint_answer_shift/pre_accuracy"] == pytest.approx(
+    assert step["joint/joint_answer_shift/pre_accuracy"] == pytest.approx(
       bagging.float().mean().item()
     )
 

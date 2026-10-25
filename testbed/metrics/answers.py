@@ -23,6 +23,24 @@ def expert_accuracy(post: torch.Tensor, y: torch.Tensor) -> float:
   return rate(post.argmax(-1) == y[:, None])
 
 
+def answer_grid(post: torch.Tensor, y: torch.Tensor) -> dict[str, float]:
+  """Shares of examples by how many experts answer correctly (all, some or
+  none) and whether the averaged answer does. Every example is in exactly one
+  cell. With every expert right the average is right too, so that cell has no
+  split."""
+  right = post.argmax(-1) == y[:, None]  # (N, M) each expert's own answer
+  avg_right = average(post).argmax(-1) == y
+  all_right, none_right = right.all(1), ~right.any(1)
+  some_right = ~all_right & ~none_right
+  return {
+    "all_right": rate(all_right),
+    "some_right_avg_right": rate(some_right & avg_right),
+    "some_right_avg_wrong": rate(some_right & ~avg_right),
+    "none_right_avg_right": rate(none_right & avg_right),
+    "none_right_avg_wrong": rate(none_right & ~avg_right),
+  }
+
+
 def joint_answer_shift(
   pre: torch.Tensor, post: torch.Tensor, y: torch.Tensor
 ) -> dict[str, float]:

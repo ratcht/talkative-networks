@@ -5,7 +5,7 @@ definition and how to read it. The tests check that every key a run logs
 matches an entry here, and that every entry has its section.
 
 Placeholders in keys:
-  {split}  train, joint_val or test
+  {split}  joint, joint_val or test
   {site}   where in the ensemble: ex0, ex1, ... for forward exchanges, or
            ex0/round0, ex0/round1, ... for the rounds of a backward exchange
   {i}      an expert, numbered from 0 in group order
@@ -56,6 +56,14 @@ METRICS = (
     "Task performance",
     ("{split}/expert_accuracy",),
     "Share of the experts' own answers that are correct, after communication.",
+  ),
+  Metric(
+    "answer_grid",
+    "Communication interpretation",
+    ("{split}/answer_grid/{cell}", "answer_grid/{cell}/{site}"),
+    "Shares of examples by how many experts are right (all, some, none) and "
+    "whether the averaged answer is. The five cells sum to 1. Also after each "
+    "round of a backward exchange.",
   ),
   Metric(
     "joint_answer_shift",

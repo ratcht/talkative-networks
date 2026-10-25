@@ -10,6 +10,7 @@ docs/testbed/metrics.md.
 
 from testbed.metrics.answers import (
   accuracy,
+  answer_grid,
   answer_shift_kl,
   expert_accuracy,
   joint_answer_shift,
@@ -24,6 +25,7 @@ __all__ = [
   "ExchangeMeter",
   "OptimisationMeter",
   "accuracy",
+  "answer_grid",
   "answer_shift_kl",
   "description",
   "expert_accuracy",

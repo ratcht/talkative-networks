@@ -10,16 +10,20 @@ Most of these metrics come from the v2 testbed. §9 lists what changed.
 
 ## 1. When metrics are measured
 
-A run logs every metric at **step 0**, before any training, and again after
-every epoch, at steps $1, \dots, E$. At step 0 the channel is untrained and its
-decoders inject exactly zero, so the ensemble is plain bagging. Every effect of
-communication is a change from step 0.
+Metrics are logged during joint training only, while the channel trains on top
+of the frozen experts. Training the experts themselves, which happens once when
+a pool is built, logs nothing.
+
+A run logs every metric at **step 0**, before joint training starts, and again
+after every epoch of it, at steps $1, \dots, E$. At step 0 the channel is
+untrained and its decoders inject exactly zero, so the ensemble is plain
+bagging. Every effect of communication is a change from step 0.
 
 Each metric is measured on one or more of three splits:
 
 | split | measured | contents |
 |---|---|---|
-| `train` | during each epoch, from step 1 | accumulated over the epoch's batches, with the channel as it was at each batch |
+| `joint` | during each epoch, from step 1 | the split the channel trains on (not the experts' split), accumulated over the epoch's batches with the channel as it was at each batch |
 | `joint_val` | at step 0 and after each epoch | a full pass, including every exchange's metrics |
 | `test` | at step 0 and after each epoch | a full pass |
 
@@ -106,6 +110,7 @@ statement holds. $\operatorname{mean}_n$ averages over examples.
 | `accuracy` | share of examples the ensemble answers correctly | bagging's accuracy at step 0 |
 | `loss` | the training objective | — |
 | `expert_accuracy` | share of the experts' own answers that are correct | — |
+| `answer_grid` | shares of examples by how many experts are right, and whether the average is | the five cells sum to 1; bagging's grid at step 0 |
 | `joint_answer_shift` | answers communication corrected and corrupted | `pre_accuracy` constant across arms, trials and epochs; `net` = 0 at step 0 |
 | `marginal_answer_shift` | the same, with only one expert's update applied | 0 at step 0 |
 | `answer_shift_kl` | how far communication moved the experts' probabilities | 0 at step 0 |
@@ -156,7 +161,7 @@ $$
 \texttt{loss} = -\operatorname*{mean}_{n,i} \, \log p^{\text{post}}_{n,i,\,y_n} .
 $$
 
-Every split uses the run's own objective, so the train and joint_val losses
+Every split uses the run's own objective, so the joint and joint_val losses
 are directly comparable. Two arms trained on different objectives are not
 comparable by loss; compare them by accuracy.
 
@@ -178,8 +183,90 @@ experts themselves or only their combined answer.
 
 ## 6. Communication interpretation
 
-These metrics compare the answers before and after communication, example by
-example.
+These metrics look at the answers example by example: how the averaged answer
+relates to the experts' own answers, and how communication changed them.
+
+### `answer_grid`
+
+Where the ensemble's answer stands relative to its experts' answers. Count how
+many experts answer example $n$ correctly,
+
+$$
+k_n = \sum_i \, [\, \hat y_{n,i} = y_n \,] ,
+$$
+
+and note whether the averaged answer is correct, $[\, \hat y_n = y_n \,]$.
+Every example falls into exactly one cell of this grid, and the metric reports
+each cell's share of the examples:
+
+| averaged answer | every expert right, $k_n = M$ | some right, $0 < k_n < M$ | none right, $k_n = 0$ |
+|---|---|---|---|
+| right | `all_right` | `some_right_avg_right` | `none_right_avg_right` |
+| wrong | — | `some_right_avg_wrong` | `none_right_avg_wrong` |
+
+For example,
+
+$$
+\texttt{some_right_avg_wrong} = \operatorname*{mean}_n \, [\, 0 < k_n < M \text{ and } \hat y_n \ne y_n \,] ,
+$$
+
+and the other cells likewise. The five shares sum to 1. The experts' answers
+are their answers after communication, so an example can change cells as the
+channel trains. At step 0 the grid is bagging's.
+
+The empty cell cannot occur. When every expert puts the true class first, the
+true class has the highest probability for each of them, so it also has the
+highest average. The opposite corner can occur: experts that each put a
+different wrong class first and the true class second can average to the true
+class. That cell, `none_right_avg_right`, is rare; on the first class-skewed
+pools it held no test image at step 0.
+
+The cells add up to two familiar numbers. The ensemble's accuracy is
+
+$$
+\texttt{accuracy} = \texttt{all_right} + \texttt{some_right_avg_right} + \texttt{none_right_avg_right} ,
+$$
+
+and the share of examples that at least one expert gets right (v2's oracle
+accuracy) is $\texttt{all_right} + \texttt{some_right_avg_right} + \texttt{some_right_avg_wrong}$.
+
+The two error cells mean different things:
+
+- `some_right_avg_wrong`: an expert knew the answer and the vote lost it. A
+  better way of combining the experts could recover these, so this is the room
+  communication has to work with. At step 0 it is a property of the expert
+  group.
+- `none_right_avg_wrong`: no expert knew the answer. Choosing better among the
+  experts cannot fix these. Only an expert whose own answer changes from wrong
+  to right moves an example out of this cell.
+
+Over training, watch where the shares move. Mass leaving `some_right_avg_wrong`
+means the vote now gets right examples that some expert already knew. Mass
+leaving the `none_right` cells means an expert now gets right an example no
+expert did before. Combining what the experts know is one way to get there, but
+an expert can also get there on its own: a decoder that learns a fixed shift
+can correct its expert's lean toward its favourite classes, with no message
+involved. So read moves out of `none_right` with `inj_spread`; from a
+near-constant injection they are self-correction, not communication. Mass
+moving from `some_right_avg_right` to `all_right` changes no answer of the
+ensemble's; it means the experts agree more. The grid shows only how big each
+cell is; `joint_answer_shift` counts the answers that changed in each
+direction.
+
+Logged on all three splits. For a backward exchange it is also logged after
+each round, on joint_val, under that round's site (`answer_grid/all_right/ex0/round0`,
+…). Each of these is the grid the experts' answers would give had communication
+stopped after that round. The last round's grid is the joint_val grid itself.
+Before the first round the answers are bagging's, which is the grid at step 0.
+Read round by round, the grid shows what each extra round adds: whether later
+rounds keep moving examples out of the error cells, or only shuffle them.
+Forward exchanges have no grid of their own, because their answers exist only
+at the end of the single pass, after every exchange has run.
+
+The intent of this measurement is to show where the ensemble's errors sit
+relative to its experts, either recoverable by combining them better or beyond
+what any one of them knows, and how communication moves examples between the
+two.
 
 ### `joint_answer_shift`
 
@@ -230,8 +317,8 @@ Agreement rising while `net` does not means the experts are converging on
 each other's answers rather than on the right one: consensus without
 correctness.
 
-Logged on all three splits. On train it covers the epoch's batches as the
-channel was at each batch, so it trails joint_val slightly; its
+Logged on all three splits. On the joint split it covers the epoch's batches
+as the channel was at each batch, so it trails joint_val slightly; its
 `pre_accuracy` is still constant, since the experts and the joint split never
 change.
 
@@ -656,7 +743,8 @@ $10^{-1}$ is thrashing.
 - **One version per metric.** v2 logged most communication metrics twice: on
   each training batch, and over the full validation set. v3 keeps only the
   full pass over joint_val, which takes a fraction of a second. The exceptions
-  are `joint_answer_shift`, also logged on train, and the training dynamics.
+  are `joint_answer_shift` and `answer_grid`, also logged on the joint split,
+  and the training dynamics.
 - **Exact over the whole split.** v2 computed `inj_*` and `msg_rank_*` on one
   fixed batch of 128. v3 computes them over all of joint_val. `inj_rank` now
   uses the matrix over positions, $R^\top R$, rather than over examples,
@@ -678,4 +766,5 @@ $10^{-1}$ is thrashing.
   - `layernorm_param_norm`: v3 has no LayerNorm.
   - `pool_mask_dev`: no v3 encoder has a fixed learned mask.
   - The per-batch copies of the routing and answer-shift metrics.
-- **New in v3.** `expert_accuracy`, from the testbed skeleton.
+- **New in v3.** `expert_accuracy`, from the testbed skeleton, and
+  `answer_grid`.
