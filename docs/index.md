@@ -1,7 +1,14 @@
 # chatty-networks
 
-Docs for the frozen-backbone ensembling pipeline (snapshot pool → selection →
-joint training). Currently just the Aim metric glossary; add pages here as
-the project needs them.
+Docs for communicating ensembles of frozen experts.
 
-See [Aim metrics](metrics.md) for what every tracked metric means.
+**Testbed (v3)**, the current pipeline in `testbed/`:
+
+- [Metrics](testbed/metrics.md): what every logged metric means, how it is
+  computed and how to read it.
+- [Docket](docket.md): design decisions, and what is still open.
+
+The v2 pipeline (`backbone/`, `ensemble/`, `selection/`, `splits/`, `scripts/`)
+and its Aim metric glossary are on `main`.
+
+Serve locally with `uv run mkdocs serve`.

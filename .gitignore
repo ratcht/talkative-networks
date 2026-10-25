@@ -3,3 +3,9 @@
 **/__pycache__/**
 data/**
 site/**
+# local state: expert cache, MLflow tracking, v2 run bookkeeping
+cache/**
+mlflow.db
+mlartifacts/**
+mlruns/**
+scripts/replicate_state/**
