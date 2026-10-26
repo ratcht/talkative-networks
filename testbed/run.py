@@ -24,6 +24,7 @@ experts, so they compare trial by trial.
 """
 
 import argparse
+import subprocess
 from dataclasses import asdict
 from statistics import mean
 
@@ -35,7 +36,7 @@ from testbed.communication import (
   Exchange,
   build_ensemble,
 )
-from testbed.data import DATASETS, load
+from testbed.data import DATASETS, REPO_ROOT, load
 from testbed.metrics import description
 from testbed.moe import GATES, GateConfig, build_gated
 from testbed.experts import (
@@ -85,6 +86,22 @@ def check_flags(args: argparse.Namespace) -> None:
     )
   if args.gate_read and not args.gate:
     raise SystemExit("--gate-read needs a --gate")
+
+
+def code_version() -> dict[str, str]:
+  """The commit the code ran from, and whether the working tree differed from
+  it, so a run can be traced back to the code that made it."""
+
+  def git(*command: str) -> str:
+    return subprocess.run(
+      ["git", *command], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+  try:
+    dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
+    return {"git_commit": git("rev-parse", "HEAD"), "git_dirty": str(dirty).lower()}
+  except (OSError, subprocess.CalledProcessError):
+    return {"git_commit": "unknown", "git_dirty": "unknown"}
 
 
 def extra_tags(args: argparse.Namespace) -> dict[str, str]:
@@ -197,7 +214,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
   args = parse_args(argv)
   check_flags(args)  # before loading anything, so bad flags fail fast
-  tags = extra_tags(args)
+  tags = extra_tags(args) | code_version()
   exchanges = [Exchange(read, write) for read, write in args.exchange]
   gate = (
     GateConfig(architecture=args.gate, read=args.gate_read, width=args.width)

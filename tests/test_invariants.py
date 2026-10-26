@@ -32,7 +32,7 @@ from testbed.experts import (
   SeedOnly,
   get_pool,
 )
-from testbed.run import extra_tags, parse_args
+from testbed.run import code_version, extra_tags, parse_args
 from testbed.seeds import derive, generator
 from testbed.train import loss_fn
 
@@ -138,6 +138,11 @@ def test_channel_size_matches_the_docs():
 
 
 ARGS = ["--arm", "a", "--trial-seeds", "0"]
+
+
+def test_runs_record_the_code_they_ran_from():
+  version = code_version()
+  assert len(version["git_commit"]) == 40 and version["git_dirty"] in ("true", "false")
 
 
 def test_the_command_line_takes_tags_and_full_flag_names_only():

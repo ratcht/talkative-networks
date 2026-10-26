@@ -49,6 +49,88 @@ exchange points.
 Every part reads or writes through $r = 8$: the linear taper encoders'
 readings, the decoders' patterns, and the gate's readings of each expert.
 
+## The experiment
+
+Decided 2026-10-25 unless marked proposed.
+
+**What counts as a result.** Two comparisons per level, each made trial seed
+by trial seed and then averaged:
+
+- the level minus its `self` control: what communication adds over each
+  expert's own add-on;
+- the level minus the MoE: whether communicating beats weighing the experts.
+
+Anything else read off the runs is exploratory. The MoE isn't matched to the
+channel in size; it is meant to be a sensible baseline, not an equal-weight one.
+
+**Protocol.** 15 trial seeds (0–14, the runner's default) for every arm, 30
+joint epochs, learning rate 1e-3, the joint loss. Each run is read as the
+median test accuracy over the 5 epochs around its best joint_val epoch
+(`testbed/results.py`). Every run records the git commit it ran from.
+
+**Phase 1: where to attach.** Level 1 and its `self` control at every exchange
+pair, and the MoE at every read point:
+
+| direction | exchange pairs |
+|---|---|
+| forward | stage1 → stage2, stage2 → stage3, stage1 → stage3 |
+| backward | stage2 → stage1, stage3 → stage2, stage3 → stage1 |
+
+That is 12 channel arms and 3 MoE arms. Each direction gets its own pair; the
+two needn't mirror each other. Proposed rule, fixed before any phase 1 run:
+
+- each direction's pair is the one with the largest mean of level 1 minus
+  `self`;
+- the MoE's read point is the one with its own highest mean, so the baseline
+  is at its best.
+
+After phase 1, check again whether 30 epochs is long enough.
+
+**Phase 2: the ladder.** All four levels with `attention`, `self` and `mean`
+at each direction's chosen pair, and the MoE at its chosen point. The level 1
+and `self` arms there were already run in phase 1, so 18 channel arms are new.
+
+**Cost on the laptop**, one run at a time: about 30 s per forward run and 65 s
+per backward run, so phase 1 is roughly 3 hours and phase 2 roughly 4. If it
+drags, it moves to the lab machine, one run per GPU.
+
+## Running an arm
+
+`studies/channel_ladder/run.py` runs one arm over a list of trial seeds. An
+arm is one of three kinds:
+
+| kind | flags | tagged |
+|---|---|---|
+| a level | `--level L --exchange READ WRITE`, and `--mixer self` or `--mixer mean` for a control | `level` |
+| the MoE baseline | `--moe READ`, where its gate reads | `baseline=moe` |
+| bagging | `--bagging` | `baseline=bagging` |
+
+```bash
+uv run python -m studies.channel_ladder.run --level 2-encoder --arm forward-2e \
+  --exchange stage2 stage3 --trial-seeds 0 1 2
+uv run python -m studies.channel_ladder.run --moe stage3 --arm moe-stage3 \
+  --trial-seeds 0 1 2
+```
+
+The runner hands `testbed.run` the study's choices: the level's parts or the
+study's gate, the mixer (`attention` unless a control is named) and the
+study's width. It also sets the study's default of 30 joint epochs. Every
+other flag is `testbed.run`'s, and a flag given here overrides a default. It
+refuses two things:
+
+- flags the arm sets: `--encoder`, `--decoder`, `--gate`, `--gate-read`, or an
+  `--exchange` for a baseline;
+- more than one kind of arm at a time.
+
+Every run is tagged in MLflow with `study` (`channel-ladder`) and with its
+`level` or `baseline`. These come on top of `testbed.run`'s own tags: `arm`,
+`trial_seed`, `direction`, and `gate` for the MoE. Each run also logs its
+parts by name, so it stays readable even if the levels are ever renumbered.
+When grouping runs:
+
+- group on the width and the mixer as well, which are params;
+- runs started through `testbed.run` directly carry no study tags.
+
 ## Next levels
 
 Not built. They come once the four levels have been read:
