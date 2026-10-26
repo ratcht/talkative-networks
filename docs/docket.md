@@ -48,8 +48,10 @@ Baselines for every arm:
   - It starts as bagging and changes no expert's own answer.
   - It is 13.9k weights reading stage3 and 37.7k reading stage2, for all
     three experts.
-  - Run it through the study's runner, so it gets the same 30 epochs as the
-    levels.
+  - Run it through the study's runner (`--moe READ`), so it gets the same
+    30 epochs as the levels.
+  - DECISION (user, 2026-10-25): where the gate reads is an ablation, like
+    the channel's exchange points.
   - Smoke run, trial seed 0: bagging 0.8849, MoE 0.8933 reading stage3 and
     0.8923 reading stage2. It trained steadily, and the largest weight
     averaged 0.89.

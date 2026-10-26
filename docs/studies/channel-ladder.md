@@ -77,7 +77,8 @@ pair, and the MoE at every read point:
 | backward | stage2 → stage1, stage3 → stage2, stage3 → stage1 |
 
 That is 12 channel arms and 3 MoE arms. Each direction gets its own pair; the
-two needn't mirror each other. Proposed rule, fixed before any phase 1 run:
+two needn't mirror each other. The rule, fixed before any phase 1 run (user,
+2026-10-26):
 
 - each direction's pair is the one with the largest mean of level 1 minus
   `self`;
