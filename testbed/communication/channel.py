@@ -18,6 +18,13 @@ three parts, each a small contract:
            starts at zero, so an untrained channel injects nothing: the
            ensemble starts as bagging.
 
+The `linear_taper` encoders and decoders are two linear layers through a
+narrow width that read and write the whole feature map, so they never pool or
+broadcast; `linear_taper_gelu` adds a GELU between the two. The `self` and
+`mean` mixers are controls: the same channel without communication, or without
+choosing whom to listen to. `pooled`, `spatial` and `broadcast` make spatial
+assumptions. docs/testbed/channel.md defines every part.
+
 For now every encoder sends exactly one message per expert
 (MESSAGES_PER_EXPERT). The mixer and decoders already handle any T, so
 allowing more takes an encoder that sends them and a change to that constant.
@@ -29,17 +36,19 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 MESSAGES_PER_EXPERT = 1
 
 
 @dataclass(frozen=True)
 class ChannelConfig:
-  encoder: str = "pooled"
+  encoder: str = "linear_taper"
   mixer: str = "attention"
-  decoder: str = "broadcast"
+  decoder: str = "linear_taper"
   key_dim: int = 16
   value_dim: int = 64
+  width: int = 8  # r: the narrow middle of the linear taper parts
 
 
 @dataclass
@@ -61,7 +70,8 @@ class Mixer(nn.Module, ABC):
   ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """(B, M, T, D) each -> what each expert received, (B, M, T, value_dim),
     and the mixing weights, (B, M, T, M, T): how much each received message
-    drew on each sent one. None for a mixer that doesn't weight senders."""
+    drew on each sent one. None for a mixer whose weights are fixed by
+    construction, which leaves no routing to read."""
 
 
 class Decoder(nn.Module, ABC):
@@ -85,6 +95,37 @@ def positions(features: torch.Tensor) -> torch.Tensor:
   return (
     features.flatten(2).transpose(1, 2) if features.dim() > 2 else features.unsqueeze(1)
   )
+
+
+class LinearTaperEncoder(Encoder):
+  """Two linear layers through a narrow width. The first reads the whole
+  feature map, every channel at every position, through `width` learned
+  templates; the second builds the query, key and value from those readings.
+  So the message is one linear map of the features, and it carries at most
+  `width` independent numbers."""
+
+  gelu = False
+
+  def __init__(self, config: ChannelConfig, in_shape: tuple[int, ...]):
+    super().__init__()
+    self.read = nn.Linear(math.prod(in_shape), config.width)
+    self.query = nn.Linear(config.width, config.key_dim)
+    self.key = nn.Linear(config.width, config.key_dim)
+    self.value = nn.Linear(config.width, config.value_dim)
+
+  def forward(self, features: torch.Tensor) -> Message:
+    readings = self.read(features.flatten(1)).unsqueeze(1)  # (B, 1, width)
+    if self.gelu:
+      readings = F.gelu(readings)
+    return Message(self.query(readings), self.key(readings), self.value(readings))
+
+
+class LinearTaperGELUEncoder(LinearTaperEncoder):
+  """The linear taper encoder with a GELU on its readings, so the message can
+  be a nonlinear function of the features. Its weights are the linear taper
+  encoder's."""
+
+  gelu = True
 
 
 class PooledEncoder(Encoder):
@@ -143,6 +184,65 @@ class AttentionMixer(Mixer):
     return received, weights.unflatten(1, (m, t)).unflatten(3, (m, t))
 
 
+class SelfMixer(Mixer):
+  """A control: each expert receives only its own message. The channel keeps
+  all its parts but loses communication, so what it still gains over bagging
+  is each expert's own add-on, trained on the joint split. The query and key go
+  unused, so they get no gradient."""
+
+  def __init__(self, config: ChannelConfig):
+    super().__init__()
+
+  def forward(
+    self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
+  ) -> tuple[torch.Tensor, None]:
+    return value, None
+
+
+class MeanMixer(Mixer):
+  """A second control: every expert receives the plain average of every
+  expert's message, its own included. That is communication without choosing
+  whom to listen to. The query and key go unused, so they get no gradient."""
+
+  def __init__(self, config: ChannelConfig):
+    super().__init__()
+
+  def forward(
+    self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
+  ) -> tuple[torch.Tensor, None]:
+    return value.mean((1, 2), keepdim=True).expand_as(value), None
+
+
+class LinearTaperDecoder(Decoder):
+  """Two linear layers through a narrow width. The first turns what was
+  received into `width` numbers, each the strength of one learned pattern the
+  size of the whole write point; the second injects that mix of patterns. The
+  patterns have no bias, so the injection is always a mix of them, and they
+  start at zero."""
+
+  gelu = False
+
+  def __init__(self, config: ChannelConfig, out_shape: tuple[int, ...]):
+    super().__init__()
+    self.narrow = nn.Linear(config.value_dim, config.width)
+    self.write = nn.Linear(config.width, math.prod(out_shape), bias=False)
+    nn.init.zeros_(self.write.weight)
+
+  def forward(self, received: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
+    strengths = self.narrow(received.mean(1))  # (B, width)
+    if self.gelu:
+      strengths = F.gelu(strengths)
+    return self.write(strengths).view(features.shape)
+
+
+class LinearTaperGELUDecoder(LinearTaperDecoder):
+  """The linear taper decoder with a GELU on the patterns' strengths, so the
+  injection can be a nonlinear function of the message. Its weights are the
+  linear taper decoder's."""
+
+  gelu = True
+
+
 class BroadcastDecoder(Decoder):
   """Turns what was received into one value per channel and injects it at
   every position."""
@@ -188,11 +288,19 @@ class SpatialDecoder(Decoder):
 
 
 ENCODERS: dict[str, type[Encoder]] = {
+  "linear_taper": LinearTaperEncoder,
+  "linear_taper_gelu": LinearTaperGELUEncoder,
   "pooled": PooledEncoder,
   "spatial": SpatialEncoder,
 }
-MIXERS: dict[str, type[Mixer]] = {"attention": AttentionMixer}
+MIXERS: dict[str, type[Mixer]] = {
+  "attention": AttentionMixer,
+  "self": SelfMixer,
+  "mean": MeanMixer,
+}
 DECODERS: dict[str, type[Decoder]] = {
+  "linear_taper": LinearTaperDecoder,
+  "linear_taper_gelu": LinearTaperGELUDecoder,
   "broadcast": BroadcastDecoder,
   "spatial": SpatialDecoder,
 }

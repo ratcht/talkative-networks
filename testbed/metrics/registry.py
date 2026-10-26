@@ -167,13 +167,17 @@ METRICS = (
   Metric(
     "grad_norm",
     "Training dynamics",
-    ("grad_norm/total", "grad_norm/{component}/ex{e}"),
-    "Size of the gradient reaching each part of the channel.",
+    ("grad_norm/total", "grad_norm/{component}/ex{e}", "grad_norm/gate.{part}"),
+    "Size of the gradient reaching each part of the channel, or of the MoE's gate.",
   ),
   Metric(
     "update_ratio",
     "Training dynamics",
-    ("update_ratio/total", "update_ratio/{component}/ex{e}"),
+    (
+      "update_ratio/total",
+      "update_ratio/{component}/ex{e}",
+      "update_ratio/gate.{part}",
+    ),
     "How far one optimiser step moves each part, relative to its size.",
   ),
 )

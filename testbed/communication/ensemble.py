@@ -60,6 +60,9 @@ class Output:
   log_probs: torch.Tensor  # (B, C) log of the mean expert probability: pair with NLLLoss, not CrossEntropyLoss
   logits: torch.Tensor  # (B, M, C) each expert's own answer
   traces: list[Trace]  # in the order the exchanges ran; empty without communication
+  # (B, M) how much each expert's answer counts in log_probs, summing to 1 over
+  # the experts; None when every expert counts the same (testbed/moe.py)
+  weights: torch.Tensor | None = None
 
 
 def direction(exchanges: list[Exchange], points: list[str], rounds: int) -> str:
@@ -93,11 +96,16 @@ def direction(exchanges: list[Exchange], points: list[str], rounds: int) -> str:
   return "forward"
 
 
-def average(logits: torch.Tensor) -> torch.Tensor:
-  """(B, M, C) logits -> (B, C) log of the mean probability, via logsumexp."""
-  return torch.logsumexp(F.log_softmax(logits, dim=-1), dim=1) - math.log(
-    logits.shape[1]
-  )
+def average(logits: torch.Tensor, weights: torch.Tensor | None = None) -> torch.Tensor:
+  """(B, M, C) logits -> (B, C) log of the mean probability, via logsumexp.
+  With `weights` (B, M), each summing to 1 over the experts, the mean is
+  weighted by them; without, every expert counts the same."""
+  if weights is None:
+    return torch.logsumexp(F.log_softmax(logits, dim=-1), dim=1) - math.log(
+      logits.shape[1]
+    )
+  log_weights = weights.clamp_min(torch.finfo(weights.dtype).tiny).log()
+  return torch.logsumexp(F.log_softmax(logits, dim=-1) + log_weights[..., None], dim=1)
 
 
 class CommunicatingEnsemble(nn.Module):
@@ -125,6 +133,11 @@ class CommunicatingEnsemble(nn.Module):
     super().train(mode)
     self.experts.eval()  # frozen experts never leave eval mode
     return self
+
+  @property
+  def trainable(self) -> nn.Module:
+    """What joint training trains: the channels."""
+    return self.channels
 
   def forward(self, x: torch.Tensor, answer_each_round: bool = False) -> Output:
     """With answer_each_round, a backward exchange also records the experts'

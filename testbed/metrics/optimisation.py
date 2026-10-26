@@ -9,9 +9,13 @@ from torch.nn.utils import parameters_to_vector
 
 
 def component(name: str) -> str:
-  """Where a parameter of an ensemble's channels sits, as a key suffix:
-  '0.encoders.2.query.weight' -> 'encoder.query/ex0'. Read off the module
-  tree, so a new part gets its own series without a list to update."""
+  """Where a trained parameter sits, as a key suffix:
+  '0.encoders.2.query.weight' -> 'encoder.query/ex0' for a channel, and
+  'gate.reads.1.weight' -> 'gate.read' for a soft-gated MoE's gate, which
+  belongs to no exchange. Read off the module tree, so a new part gets its own
+  series without a list to update."""
+  if name.startswith("gate."):
+    return "gate." + name.split(".")[1].removesuffix("s")  # pooled over experts
   exchange, group, *rest = name.split(".")
   if group in ("encoders", "decoders"):
     group = f"{group.removesuffix('s')}.{rest[1]}"  # rest[0] is the expert; pooled over experts
@@ -42,6 +46,7 @@ class OptimisationMeter:
       len(self.names), dtype=torch.float64, device=self.device
     )
     self.update_ratio = torch.zeros_like(self.grad_norm)
+    self.measured = torch.zeros_like(self.grad_norm)  # steps with a size to compare to
     self.steps = 0
 
   def _norms(self, flat: torch.Tensor) -> torch.Tensor:
@@ -60,7 +65,12 @@ class OptimisationMeter:
   @torch.no_grad()
   def after_step(self) -> None:
     moved = self._norms(parameters_to_vector(self.params) - self.before)
-    self.update_ratio += moved / self._norms(self.before).clamp_min(1e-12)
+    size = self._norms(self.before)
+    # a part still all zero, like a decoder's zero-initialised patterns before
+    # their first step, has no size to compare its move to: skip that step
+    measured = size > 0
+    self.update_ratio += torch.where(measured, moved / size.clamp_min(1e-12), 0)
+    self.measured += measured
     self.steps += 1
 
   def result(self) -> dict[str, float]:
@@ -68,7 +78,7 @@ class OptimisationMeter:
     for name, g, u in zip(
       self.names,
       (self.grad_norm / self.steps).tolist(),
-      (self.update_ratio / self.steps).tolist(),
+      (self.update_ratio / self.measured.clamp_min(1)).tolist(),
     ):
       out[f"grad_norm/{name}"] = g
       out[f"update_ratio/{name}"] = u

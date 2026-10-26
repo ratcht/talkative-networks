@@ -9,7 +9,7 @@ a second.
 The official training set is split per class into
   expert     trains the experts
   joint      trains the communication channel
-  joint_val  picks the channel's best epoch; never seen by any expert
+  joint_val  picks the epochs each run is read at; never seen by any expert
 The official test set is kept apart and only used for final scores.
 """
 

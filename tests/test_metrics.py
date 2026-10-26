@@ -28,6 +28,7 @@ from testbed.metrics.answers import answer_shift_kl
 from testbed.metrics.exchanges import InjectionSums, participation_ratio, routing
 from testbed.metrics.optimisation import OptimisationMeter, component
 from testbed.metrics.registry import find
+from testbed.moe import GateConfig, build_gated
 from testbed.train import JointConfig, loss_fn, train
 
 DOCS = REPO_ROOT / "docs" / "testbed" / "metrics.md"
@@ -244,9 +245,29 @@ def test_gradient_norms_split_the_total():
   )
 
 
+def test_a_part_that_starts_at_zero_is_measured_from_its_first_move():
+  """The linear decoder's patterns start at zero. Their first step has no size
+  to compare to, so it is skipped rather than read as an enormous ratio."""
+  model = build_ensemble(
+    random_experts(), [Exchange("stage1", "stage2")], ChannelConfig(), (1, 28, 28), 1, 0
+  )
+  meter = OptimisationMeter(model.channels)
+  for _ in range(2):  # zero to 0.01 everywhere, then 0.01 to 0.02: a ratio of 1
+    meter.before_step()
+    with torch.no_grad():
+      for decoder in model.channels[0].decoders:
+        decoder.write.weight.add_(0.01)
+    meter.after_step()
+  out = meter.result()
+  assert out["update_ratio/decoder.write/ex0"] == pytest.approx(1)
+  assert out["update_ratio/encoder.read/ex0"] == 0  # measured both steps, never moved
+
+
 def test_parameters_are_grouped_by_where_they_sit():
   assert component("0.encoders.2.query.weight") == "encoder.query/ex0"
+  assert component("0.encoders.0.read.bias") == "encoder.read/ex0"
   assert component("0.encoders.1.position") == "encoder.position/ex0"
+  assert component("1.decoders.0.write.weight") == "decoder.write/ex1"
   assert component("1.decoders.0.mlp.2.bias") == "decoder.mlp/ex1"
   assert component("0.mixer.proj.weight") == "mixer/ex0"
 
@@ -267,13 +288,24 @@ class Recorder:
 
 ARMS = {
   "forward": ([Exchange("stage1", "stage2")], 1, ChannelConfig()),
+  "forward_self": ([Exchange("stage1", "stage2")], 1, ChannelConfig(mixer="self")),
+  "forward_broadcast": (
+    [Exchange("stage1", "stage3")],
+    1,
+    ChannelConfig(encoder="pooled", decoder="broadcast"),
+  ),
   "forward_spatial": (
     [Exchange("stage1", "stage3")],
     1,
     ChannelConfig(encoder="spatial", decoder="spatial"),
   ),
-  "backward": ([Exchange("stage3", "stage1")], 2, ChannelConfig()),
+  "backward": (
+    [Exchange("stage3", "stage1")],
+    2,
+    ChannelConfig(encoder="linear_taper_gelu", decoder="linear_taper_gelu"),
+  ),
   "bagging": ([], 1, ChannelConfig()),
+  "moe": ([], 1, ChannelConfig()),  # a gate instead of a channel; see run()
 }
 
 
@@ -281,9 +313,12 @@ ARMS = {
 def run(request):
   exchanges, rounds, config = ARMS[request.param]
   data = fake_data(n=400)
-  model = build_ensemble(
-    random_experts(), exchanges, config, data.input_shape, rounds, 0
-  )
+  if request.param == "moe":
+    model = build_gated(random_experts(), GateConfig(), data.input_shape, 0)
+  else:
+    model = build_ensemble(
+      random_experts(), exchanges, config, data.input_shape, rounds, 0
+    )
   recorder = Recorder()
   history = train(model, data, JointConfig(epochs=2, batch_size=50), 0, recorder)
   return request.param, model, data, recorder, history
@@ -370,20 +405,38 @@ def test_each_exchange_is_measured_where_it_ran(run):
   }
   expected = {
     "forward": {"ex0"},
+    "forward_self": {"ex0"},
+    "forward_broadcast": {"ex0"},
     "forward_spatial": {"ex0"},
     "backward": {"ex0/round0", "ex0/round1"},
     "bagging": set(),
+    "moe": set(),
   }[arm]
   assert sites == expected
   last = history[-1]
   for site in sites:
     assert last[f"msg_norm/injection/{site}"] > 0  # the channel learned to write
-    assert f"route_flip_rate/{site}" in last
-    if arm == "forward_spatial":
-      assert last[f"inj_resid_frac/{site}"] > 0
-    else:  # broadcast: one value per channel, the same at every position
+    # the self control has no mixing weights, so no routing to read
+    assert (f"route_flip_rate/{site}" in last) == (arm != "forward_self")
+    if arm == "forward_broadcast":  # one value per channel, the same at every position
       assert last[f"inj_resid_frac/{site}"] < 1e-12
       assert last[f"inj_rank/{site}"] == 0
+    else:
+      assert last[f"inj_resid_frac/{site}"] > 0
+
+
+def test_linear_taper_parts_send_and_write_at_most_width_directions(run):
+  """A linear_taper or linear_taper_gelu encoder builds its value from `width`
+  readings, and the decoders of the same names write a mix of `width`
+  patterns."""
+  arm, model, _, _, history = run
+  if arm not in ("forward", "forward_self", "backward"):
+    return
+  width = ARMS[arm][2].width
+  for step in history:
+    for key, value in step.items():
+      if key.startswith(("msg_rank_value/", "inj_rank/")):
+        assert value <= width + 1e-6, key
 
 
 def test_every_registry_metric_is_documented():
@@ -401,3 +454,21 @@ def test_attention_stays_in_bounds(run):
         assert -1e-9 <= value <= math.log(m) + 1e-6, key
       if key.startswith("attn_top1/"):  # 1/M for all equally, 1 for one sender
         assert 1 / m - 1e-6 <= value <= 1 + 1e-6, key
+
+
+def test_the_moe_reweighs_answers_and_changes_no_expert(run):
+  """The gate trains and the ensemble's answer moves, while every metric of
+  the experts' own answers stays at its step-0 value."""
+  arm, _, _, _, history = run
+  if arm != "moe":
+    return
+  first, last = history[0], history[-1]
+  assert last["grad_norm/gate.score"] > 0 and "grad_norm/gate.read" in last
+  for split in ("joint_val", "test"):
+    assert last[f"{split}/expert_accuracy"] == first[f"{split}/expert_accuracy"]
+    shift = f"{split}/joint_answer_shift/"
+    assert last[shift + "agreement_post"] == first[shift + "agreement_pre"]
+  assert last["joint_val/answer_shift_kl"] == pytest.approx(0, abs=1e-7)
+  for key, value in last.items():
+    if key.startswith("joint_val/marginal_answer_shift/"):
+      assert value == 0, key

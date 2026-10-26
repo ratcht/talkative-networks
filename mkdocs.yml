@@ -4,8 +4,12 @@ docs_dir: docs
 nav:
   - Home: index.md
   - Testbed (v3):
+      - Channel: testbed/channel.md
+      - Soft-gated MoE: testbed/moe.md
       - Metrics: testbed/metrics.md
       - Docket: docket.md
+  - Studies:
+      - Channel ladder: studies/channel-ladder.md
 
 markdown_extensions:
   # generic mode hands math to MathJax rather than rendering it server-side, and

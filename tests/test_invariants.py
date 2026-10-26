@@ -5,6 +5,7 @@ run in seconds with no downloads, GPU or MLflow.
   uv run pytest tests
 """
 
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -14,7 +15,14 @@ import torch
 from fakes import fake_data, random_experts
 
 from testbed.communication import ChannelConfig, Exchange, Message, build_ensemble
-from testbed.communication.channel import PooledEncoder, build_channel
+from testbed.communication.channel import (
+  LinearTaperDecoder,
+  LinearTaperEncoder,
+  LinearTaperGELUDecoder,
+  LinearTaperGELUEncoder,
+  PooledEncoder,
+  build_channel,
+)
 from testbed.data import Weighted
 from testbed.experts import (
   Budget,
@@ -24,6 +32,7 @@ from testbed.experts import (
   SeedOnly,
   get_pool,
 )
+from testbed.run import extra_tags, parse_args
 from testbed.seeds import derive, generator
 from testbed.train import loss_fn
 
@@ -52,24 +61,115 @@ def test_redundant_copies_share_a_mix_but_not_a_seed():
   assert recipes[0].seed != recipes[1].seed
 
 
+GELU = ChannelConfig("linear_taper_gelu", decoder="linear_taper_gelu")
+
+
 @pytest.mark.parametrize(
-  "exchanges, rounds, encoder, decoder",
+  "exchanges, rounds, config",
   [
-    ([Exchange("stage1", "stage2")], 1, "pooled", "broadcast"),
-    ([Exchange("stage1", "stage3")], 1, "spatial", "spatial"),
-    ([Exchange("stage2", "stage1")], 1, "pooled", "broadcast"),
-    ([Exchange("stage3", "stage1")], 3, "spatial", "spatial"),
-    ([], 1, "pooled", "broadcast"),
+    ([Exchange("stage1", "stage2")], 1, ChannelConfig()),
+    ([Exchange("stage2", "stage1")], 2, ChannelConfig()),
+    ([Exchange("stage1", "stage3")], 1, ChannelConfig("linear_taper_gelu")),
+    ([Exchange("stage3", "stage1")], 3, ChannelConfig(decoder="linear_taper_gelu")),
+    ([Exchange("stage2", "stage3")], 1, GELU),
+    ([Exchange("stage3", "stage2")], 2, GELU),
+    ([Exchange("stage2", "stage3")], 1, ChannelConfig(mixer="self")),
+    ([Exchange("stage3", "stage2")], 2, ChannelConfig(mixer="mean")),
+    ([Exchange("stage1", "stage2")], 1, ChannelConfig("pooled", decoder="broadcast")),
+    ([Exchange("stage1", "stage3")], 1, ChannelConfig("spatial", decoder="spatial")),
+    ([Exchange("stage2", "stage1")], 1, ChannelConfig("pooled", decoder="broadcast")),
+    ([Exchange("stage3", "stage1")], 3, ChannelConfig("spatial", decoder="spatial")),
+    ([], 1, ChannelConfig()),
   ],
 )
-def test_untrained_channel_is_bagging(exchanges, rounds, encoder, decoder):
-  config = ChannelConfig(encoder=encoder, decoder=decoder)
+def test_untrained_channel_is_bagging(exchanges, rounds, config):
   model = build_ensemble(
     random_experts(), exchanges, config, (1, 28, 28), rounds, seed=0
   )
   x = fake_data().joint_val.x
   with torch.no_grad():
     assert torch.allclose(model(x).log_probs, model.bagging(x).log_probs, atol=1e-6)
+
+
+def count(module: torch.nn.Module) -> int:
+  return sum(p.numel() for p in module.parameters())
+
+
+def additive(f, a: torch.Tensor, b: torch.Tensor) -> bool:
+  """f(a + b) - f(0) == (f(a) - f(0)) + (f(b) - f(0)): f is linear up to a constant."""
+  zero = f(torch.zeros_like(a))
+  return torch.allclose(f(a + b) - zero, f(a) + f(b) - 2 * zero, atol=1e-4)
+
+
+def test_each_level_only_adds_a_gelu():
+  """The linear_taper parts and their linear_taper_gelu versions have the same
+  weights. A linear_taper part is linear, up to its biases, and a
+  linear_taper_gelu part is not."""
+  config = ChannelConfig()
+  read, write = (32, 7, 7), (16, 14, 14)
+  encoders = [LinearTaperEncoder(config, read), LinearTaperGELUEncoder(config, read)]
+  decoders = [LinearTaperDecoder(config, write), LinearTaperGELUDecoder(config, write)]
+  # zero patterns would make any decoder linear
+  torch.nn.init.normal_(decoders[0].write.weight)
+  for linear, gelu in (encoders, decoders):
+    gelu.load_state_dict(linear.state_dict())  # strict: the same weights, name for name
+
+  x, y = torch.randn(2, 4, *read)
+  m, n = torch.randn(2, 4, 1, config.value_dim)
+  features = torch.zeros(4, *write)
+  with torch.no_grad():
+    assert additive(lambda x: encoders[0](x).value, x, y)
+    assert not additive(lambda x: encoders[1](x).value, x, y)
+    assert additive(lambda m: decoders[0](m, features), m, n)
+    assert not additive(lambda m: decoders[1](m, features), m, n)
+
+
+def test_channel_size_matches_the_docs():
+  """docs/testbed/channel.md: per expert, r (read + write + 2 key + 2 value + 2)
+  + 2 key + value weights, so a forward exchange and its backward mirror match."""
+  config = ChannelConfig()
+  r, k, v = config.width, config.key_dim, config.value_dim
+  shapes = {"stage1": (16, 14, 14), "stage2": (32, 7, 7), "stage3": (64, 3, 3)}
+  for a, b in (("stage1", "stage2"), ("stage2", "stage3"), ("stage1", "stage3")):
+    there = count(build_channel(config, shapes[a], shapes[b], num_experts=1))
+    back = count(build_channel(config, shapes[b], shapes[a], num_experts=1))
+    size = math.prod(shapes[a]) + math.prod(shapes[b])
+    assert there == back == r * (size + 2 * k + 2 * v + 2) + 2 * k + v
+
+
+ARGS = ["--arm", "a", "--trial-seeds", "0"]
+
+
+def test_the_command_line_takes_tags_and_full_flag_names_only():
+  args = parse_args([*ARGS, "--tag", "study=s", "--tag", "level=3", "--tag", "x=a=b"])
+  assert extra_tags(args) == {"study": "s", "level": "3", "x": "a=b"}
+  with pytest.raises(SystemExit):
+    extra_tags(parse_args([*ARGS, "--tag", "no-value"]))
+  with pytest.raises(SystemExit):  # so no abbreviation stands in for --encoder
+    parse_args([*ARGS, "--enc", "pooled"])
+
+
+@pytest.mark.parametrize("mixer", ["self", "mean"])
+def test_the_controls_hear_what_they_promise(mixer):
+  """self: each expert receives its own message. mean: every expert receives
+  the plain average of all of them. Neither has weights to route by, and
+  neither trains the query or key."""
+  channel = build_channel(
+    ChannelConfig(mixer=mixer), (32, 7, 7), (16, 14, 14), num_experts=3
+  )
+  features = [torch.randn(4, 32, 7, 7) for _ in range(3)]
+  reading = channel.read(features)
+  sent = reading.sent.value  # (B, M, T, value_dim)
+  heard = sent if mixer == "self" else sent.mean(1, keepdim=True).expand_as(sent)
+  assert reading.weights is None
+  assert torch.allclose(reading.received, heard)
+  for decoder in channel.decoders:  # so that the loss reaches the encoders
+    torch.nn.init.normal_(decoder.write.weight)
+  injection = channel.write(reading.received, [torch.zeros(4, 16, 14, 14)] * 3)
+  sum(i.pow(2).sum() for i in injection).backward()
+  for encoder in channel.encoders:
+    assert encoder.query.weight.grad is None and encoder.key.weight.grad is None
+    assert encoder.value.weight.grad.abs().sum() > 0
 
 
 def test_an_encoder_sends_one_message_per_expert():

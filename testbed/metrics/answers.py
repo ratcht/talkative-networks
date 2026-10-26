@@ -4,7 +4,10 @@ changed what it answers. Definitions: docs/testbed/metrics.md.
 
 Logits are (N, M, classes): `pre` from the experts with no communication,
 which is bagging, and `post` from the communicating ensemble. The experts are
-frozen, so `pre` is fixed for a given split.
+frozen, so `pre` is fixed for a given split. `weights` (N, M) are how much
+each expert's answer counts in the ensemble's, for the soft-gated MoE
+(testbed/moe.py); without them every expert counts the same. They only change
+the ensemble's answer, never an expert's own.
 """
 
 import torch
@@ -13,9 +16,11 @@ import torch.nn.functional as F
 from testbed.communication.ensemble import average
 
 
-def accuracy(post: torch.Tensor, y: torch.Tensor) -> float:
+def accuracy(
+  post: torch.Tensor, y: torch.Tensor, weights: torch.Tensor | None = None
+) -> float:
   """Share of examples the ensemble answers correctly."""
-  return rate(average(post).argmax(-1) == y)
+  return rate(average(post, weights).argmax(-1) == y)
 
 
 def expert_accuracy(post: torch.Tensor, y: torch.Tensor) -> float:
@@ -23,13 +28,15 @@ def expert_accuracy(post: torch.Tensor, y: torch.Tensor) -> float:
   return rate(post.argmax(-1) == y[:, None])
 
 
-def answer_grid(post: torch.Tensor, y: torch.Tensor) -> dict[str, float]:
+def answer_grid(
+  post: torch.Tensor, y: torch.Tensor, weights: torch.Tensor | None = None
+) -> dict[str, float]:
   """Shares of examples by how many experts answer correctly (all, some or
   none) and whether the averaged answer does. Every example is in exactly one
   cell. With every expert right the average is right too, so that cell has no
   split."""
   right = post.argmax(-1) == y[:, None]  # (N, M) each expert's own answer
-  avg_right = average(post).argmax(-1) == y
+  avg_right = average(post, weights).argmax(-1) == y
   all_right, none_right = right.all(1), ~right.any(1)
   some_right = ~all_right & ~none_right
   return {
@@ -42,11 +49,15 @@ def answer_grid(post: torch.Tensor, y: torch.Tensor) -> dict[str, float]:
 
 
 def joint_answer_shift(
-  pre: torch.Tensor, post: torch.Tensor, y: torch.Tensor
+  pre: torch.Tensor,
+  post: torch.Tensor,
+  y: torch.Tensor,
+  weights: torch.Tensor | None = None,
 ) -> dict[str, float]:
-  """Which of the ensemble's answers communication corrected and corrupted."""
+  """Which of the ensemble's answers communication corrected and corrupted.
+  `weights` belong to `post`; `pre` is bagging."""
   right_pre = average(pre).argmax(-1) == y
-  right_post = average(post).argmax(-1) == y
+  right_post = average(post, weights).argmax(-1) == y
   corrected, corrupted = rate(~right_pre & right_post), rate(right_pre & ~right_post)
   return {
     "pre_accuracy": rate(right_pre),

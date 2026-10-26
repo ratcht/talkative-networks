@@ -27,9 +27,10 @@ Each metric is measured on one or more of three splits:
 | `joint_val` | at step 0 and after each epoch | a full pass, including every exchange's metrics |
 | `test` | at step 0 and after each epoch | a full pass |
 
-Nothing selects on test. Which epoch a run is scored at is decided afterwards,
-from joint_val. That rule is still open (see `docs/docket.md`), and logging
-test at every epoch is what lets it be chosen later.
+Nothing selects on test. Afterwards each run is boiled down to one number per
+metric (`testbed/results.py`): the metric's median over the 5 epochs around
+the epoch with the highest joint_val accuracy. Logging test at every epoch is
+what makes that possible.
 
 The training-dynamics metrics are averaged over the optimiser steps of each
 epoch. Everything else is computed from passes the run makes anyway, so no
@@ -83,6 +84,13 @@ $\hat y^{\text{pre}}_n$ and $\hat y^{\text{post}}_n$ are its answers before and
 after communication. $\hat y_{n,i} = \arg\max_c \ell_{n,i,c}$ is expert $i$'s
 own answer.
 
+The one exception to the equal weights is the soft-gated MoE baseline
+([Soft-gated MoE](moe.md)), whose gate gives each expert a weight $g_{n,i}$ on
+each example, summing to 1 over the experts:
+$\bar p_n = \sum_i g_{n,i} \, p_{n,i}$. Every metric on the ensemble's answer
+uses those weights. The MoE never changes an expert's own answer, so the
+metrics on the experts' own answers stay at their step-0 values (moe.md §4).
+
 **Messages.** In an exchange, expert $i$ sends a value
 $v_{n,i} \in \mathbb{R}^{d_v}$, where $d_v$ is the channel's `value_dim` (64 by
 default). The mixer gives each receiver $r$ a weight $w_{n,rs}$ for every
@@ -123,8 +131,8 @@ statement holds. $\operatorname{mean}_n$ averages over examples.
 | `route_flip_rate` | how much routing changed since the previous step | absent at step 0 |
 | `inj_spread` | share of the injection that differs between examples | 0 at step 0 |
 | `inj_resid_frac` | share of the injection that differs between positions | 0 for the `broadcast` decoder |
-| `inj_rank` | number of distinct spatial patterns injected | 0 for `broadcast` |
-| `msg_rank_value`, `msg_rank_aggregated` | number of directions a sent or received message varies along | — |
+| `inj_rank` | number of distinct spatial patterns injected | 0 for `broadcast`; at most `width` for the linear taper decoders |
+| `msg_rank_value`, `msg_rank_aggregated` | number of directions a sent or received message varies along | `msg_rank_value` at most `width` for the linear taper encoders |
 | `msg_rank_ratio` | directions received relative to directions sent | — |
 | `grad_norm` | size of the gradient reaching each part of the channel | — |
 | `update_ratio` | how far one step moves each part, relative to its size | — |
@@ -415,7 +423,8 @@ logged. Needs a mixer with weights.
 These metrics describe what one exchange sends, how it is weighted and what is
 injected, independently of what the experts then do with it. They are logged
 per site, on joint_val. The five on attention and routing read the mixer's
-weights, and are logged only for a mixer that has them (`attention` does).
+weights, and are logged only for a mixer that has them: `attention` does, the
+`self` and `mean` controls don't.
 
 ### `msg_norm`
 
@@ -639,7 +648,9 @@ $$
 
 It is 1 for one fixed pattern whose strength varies, and above 1 when the
 pattern's shape depends on the message. It is at most $P$, a property of the
-write point rather than of the measurement. It is reported as 0 where
+write point rather than of the measurement, and at most the channel's `width`
+for the `linear_taper` and `linear_taper_gelu` decoders, whose injection is a
+mix of `width` patterns ([Channel](channel.md) §2). It is reported as 0 where
 `inj_resid_frac` is below $10^{-6}$, since then there is no spatial pattern to
 count, so `broadcast` reads 0. A feature channel with no spatial pattern
 counts as 0 in the average over channels.
@@ -667,7 +678,9 @@ $$
 `msg_rank_aggregated` is the same for the aggregated message $m_{n,i}$ the
 expert receives. Both are logged per expert and averaged (`mean`), so that one
 dead encoder shows on its own instead of being diluted in the average. Both
-are at most $d_v$.
+are at most $d_v$. `msg_rank_value` is also at most the channel's `width` for
+the `linear_taper` and `linear_taper_gelu` encoders, which build every value
+from `width` readings ([Channel](channel.md) §2).
 
 Removing the average matters. A part shared by every message would otherwise
 dominate the count and read about 1 for a channel in perfect health. The
@@ -702,10 +715,14 @@ attention is pinned to one sender.
 These measure whether the channel's weights get gradient and move, separately
 for each part of each channel. A part is named after the module it is in, e.g.
 `encoder.query/ex0` is the query layer of exchange 0's encoders, pooled over
-the experts. The parts are `encoder.query`, `encoder.key` and `encoder.value`,
-`encoder.score` and `encoder.position` for the spatial encoder, `decoder.mlp`,
-and `mixer` for a mixer with weights. `total` is every channel weight
+the experts. The parts are `encoder.query`, `encoder.key` and `encoder.value`;
+`encoder.read` for the linear taper encoders; `encoder.score` and
+`encoder.position` for the spatial encoder; `decoder.narrow` and
+`decoder.write` for the linear taper decoders; `decoder.mlp` for the
+others; and `mixer` for a mixer with weights. `total` is every channel weight
 together. A backward exchange's rounds share one channel, so it has one set.
+The soft-gated MoE has no channel. Its gate's parts are `gate.read` and
+`gate.score`, with no exchange in the key: `grad_norm/gate.score`.
 
 Both are averaged over the optimiser steps of each epoch.
 
@@ -723,7 +740,8 @@ squared norms add up to the squared `total`.
 The intent of this measurement is to catch vanishing or exploding gradients,
 part by part. `encoder.query` and `encoder.key` get gradient only through the
 attention weights, so they are the first to go quiet if the attention
-saturates. v2 traced its degenerate routing to exactly that.
+saturates. v2 traced its degenerate routing to exactly that. Under the `self`
+and `mean` controls they get none at all, by construction.
 
 ### `update_ratio`
 
@@ -737,6 +755,11 @@ Adam rescales its steps, so a healthy-looking gradient can still move the
 weights almost nothing, and this catches that. As a rough guide, about
 $10^{-3}$ per step is healthy, below $10^{-6}$ is effectively frozen, and above
 $10^{-1}$ is thrashing.
+
+A step where a part is still all zero has no size to compare its move to, so
+that step is left out of the part's average. This happens to
+`decoder.write`, whose patterns start at zero, on the first step of training.
+A part that stays all zero for a whole epoch reads 0.
 
 ## 9. Changes from v2
 
@@ -761,7 +784,8 @@ $10^{-1}$ is thrashing.
   gone.
 - **Dropped.**
   - `final_*`, `final_test_accuracy_endpoint` and the replicate `*_mean`/`*_std`
-    summaries: runs are scored from the per-step series by the results stage.
+    summaries: each run's number comes from its per-step series
+    (`testbed/results.py`).
   - `val_loss` on a single streamed batch.
   - `layernorm_param_norm`: v3 has no LayerNorm.
   - `pool_mask_dev`: no v3 encoder has a fixed learned mask.
