@@ -9,7 +9,7 @@ its runner hands each kind of arm to testbed.run.
 import pytest
 
 from studies.channel_ladder import GATE, LEVELS, MIXERS, STUDY, WIDTH, at_level
-from studies.channel_ladder.run import flags_for_testbed
+from studies.channel_ladder.run import experiment, flags_for_testbed
 from testbed.communication import DECODERS, ENCODERS, build_channel
 from testbed.communication import MIXERS as TESTBED_MIXERS
 from testbed.moe import GATES
@@ -35,7 +35,8 @@ def test_every_level_has_the_same_weights_at_the_studys_width():
   assert at_level("1", width=32).width == 32  # the width can still be ablated
 
 
-ARGS = ["--arm", "a"]
+ARGS = ["--arm", "a", "--phase", "2a"]
+TAGS = {"study": STUDY, "phase": "2a"}
 
 
 def test_a_level_gets_its_parts_mixer_and_tags():
@@ -43,7 +44,7 @@ def test_a_level_gets_its_parts_mixer_and_tags():
   args = parse_args(flags_for_testbed(argv))
   assert (args.encoder, args.decoder) == ("linear_taper", "linear_taper_gelu")
   assert (args.exchange, args.mixer) == ([["stage2", "stage1"]], "attention")
-  assert extra_tags(args) == {"study": STUDY, "level": "2-decoder"}
+  assert extra_tags(args) == TAGS | {"level": "2-decoder"}
   assert (args.epochs, args.width) == (30, WIDTH)  # the study's defaults
   assert args.trial_seeds == list(range(15))
   args = parse_args(
@@ -59,14 +60,23 @@ def test_a_level_gets_its_parts_mixer_and_tags():
 def test_the_moe_gets_the_studys_gate_and_tags():
   args = parse_args(flags_for_testbed(["--moe", "stage2", *ARGS]))
   assert (args.gate, args.gate_read, args.exchange) == (GATE, "stage2", [])
-  assert extra_tags(args) == {"study": STUDY, "baseline": "moe"}
+  assert extra_tags(args) == TAGS | {"baseline": "moe"}
   assert (args.epochs, args.width) == (30, WIDTH)
 
 
 def test_bagging_trains_nothing_and_is_tagged():
   args = parse_args(flags_for_testbed(["--bagging", *ARGS]))
   assert (args.gate, args.exchange) == (None, [])
-  assert extra_tags(args) == {"study": STUDY, "baseline": "bagging"}
+  assert extra_tags(args) == TAGS | {"baseline": "bagging"}
+
+
+def test_each_phase_is_its_own_experiment():
+  args = parse_args(flags_for_testbed(["--bagging", *ARGS]))
+  assert args.experiment == experiment("2a") == f"{STUDY}-phase2a"
+  with pytest.raises(SystemExit):
+    flags_for_testbed(["--bagging", "--arm", "a"])  # a run needs a phase
+  with pytest.raises(SystemExit):
+    flags_for_testbed(["--bagging", *ARGS, "--experiment", "v3"])
 
 
 @pytest.mark.parametrize(

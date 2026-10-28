@@ -87,13 +87,29 @@ two needn't mirror each other. The rule, fixed before any phase 1 run (user,
 
 After phase 1, check again whether 30 epochs is long enough.
 
+Phase 1 ran on 2026-10-26, and its runs are the MLflow experiment
+`channel-ladder-phase1`. It picked forward stage2 → stage3, backward
+stage3 → stage1 and the MoE at stage3, and kept 30 epochs. Its results are in
+the [docket](../docket.md).
+
 **Phase 2: the ladder.** All four levels with `attention`, `self` and `mean`
 at each direction's chosen pair, and the MoE at its chosen point. The level 1
-and `self` arms there were already run in phase 1, so 18 channel arms are new.
+and `self` arms there and the MoE were already run in phase 1, so 20 channel
+arms are new. They are split into three phases, each its own experiment and
+run in this order (user, 2026-10-28):
 
-**Cost on the laptop**, one run at a time: about 30 s per forward run and 65 s
-per backward run, so phase 1 is roughly 3 hours and phase 2 roughly 4. If it
-drags, it moves to the lab machine, one run per GPU.
+| phase | arms | question |
+|---|---|---|
+| 2a | forward stage2 → stage3: levels `2-encoder`, `2-decoder` and `3`, each with `attention` and `self` | both results for every level, forward |
+| 2b | the same 6 arms, backward stage3 → stage1 | both results for every level, backward |
+| 2c | `mean` at all four levels, at both pairs | exploratory: `mean` − `self` is what hearing the others adds, `attention` − `mean` what choosing whom to listen to adds |
+
+Each phase's comparisons take level 1, its `self` control and the MoE from
+`channel-ladder-phase1`.
+
+**Cost on the laptop**, one run at a time: about 35 s per forward run and 67 s
+per backward run. Phase 1 took about 3 hours; 2a is about 1 hour, 2b about 2
+and 2c about 2. If it drags, it moves to the lab machine, one run per GPU.
 
 ## Running an arm
 
@@ -107,24 +123,31 @@ arm is one of three kinds:
 | bagging | `--bagging` | `baseline=bagging` |
 
 ```bash
-uv run python -m studies.channel_ladder.run --level 2-encoder --arm forward-2e \
-  --exchange stage2 stage3 --trial-seeds 0 1 2
-uv run python -m studies.channel_ladder.run --moe stage3 --arm moe-stage3 \
-  --trial-seeds 0 1 2
+uv run python -m studies.channel_ladder.run --phase 2 --level 2-encoder \
+  --arm forward-2e --exchange stage2 stage3 --trial-seeds 0 1 2
+uv run python -m studies.channel_ladder.run --phase 2 --moe stage3 \
+  --arm moe-stage3 --trial-seeds 0 1 2
 ```
+
+Every run belongs to a phase, which `--phase` names (`1`, `2a`, ...). Each phase
+is its own MLflow experiment, `channel-ladder-phase<PHASE>`, so no one
+experiment holds every arm the study has run. Comparing across phases, for
+instance a phase 2 level against phase 1's MoE, means selecting both
+experiments in the MLflow UI, or searching both in a script.
 
 The runner hands `testbed.run` the study's choices: the level's parts or the
 study's gate, the mixer (`attention` unless a control is named) and the
 study's width. It also sets the study's default of 30 joint epochs. Every
 other flag is `testbed.run`'s, and a flag given here overrides a default. It
-refuses two things:
+refuses three things:
 
 - flags the arm sets: `--encoder`, `--decoder`, `--gate`, `--gate-read`, or an
   `--exchange` for a baseline;
+- `--experiment`, which the phase sets;
 - more than one kind of arm at a time.
 
-Every run is tagged in MLflow with `study` (`channel-ladder`) and with its
-`level` or `baseline`. These come on top of `testbed.run`'s own tags: `arm`,
+Every run is tagged in MLflow with `study` (`channel-ladder`), its `phase`,
+and its `level` or `baseline`. These come on top of `testbed.run`'s own tags: `arm`,
 `trial_seed`, `direction`, and `gate` for the MoE. Each run also logs its
 parts by name, so it stays readable even if the levels are ever renumbered.
 When grouping runs:

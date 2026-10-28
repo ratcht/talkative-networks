@@ -108,6 +108,36 @@ Defaults:
     `self` and `mean` at every level.
   - `pooled`, `spatial` and `broadcast` stay available as variants outside
     the ladder.
+  - Phase 1 (docs/studies/channel-ladder.md), 2026-10-26. 225 runs: 15 arms
+    × trial seeds 0–14, all from commit c28ccdf with a clean tree, every arm
+    on the same experts per trial seed. Differences are paired by trial seed,
+    in accuracy points, with 95% ranges.
+    - Level 1 − `self` is negative at all six exchange pairs, from −0.04 to
+      −0.10. Pooled over the pairs it is −0.07 ± 0.03, and level 1 is ahead
+      on only 2 of 15 trial seeds. So attention hurts a little, consistently.
+    - The rule picks forward **stage2 → stage3** (−0.040) and backward
+      **stage3 → stage1** (−0.061). Both are ties with the runners-up,
+      stage1 → stage2 (+0.003 ± 0.16 apart) and stage3 → stage2 (+0.006 ±
+      0.08 apart). It picks the least harmful pair, not where communication
+      helps.
+    - The MoE's pick is **stage3**, at 89.83. It beats stage2 by 0.11 ± 0.11
+      (12 of 15 seeds) and stage1 by 0.21 ± 0.12 (11 of 15).
+    - Every level 1 arm beats the MoE at stage3 by 0.4–0.8, on 11–14 of 15
+      trial seeds. `self` beats it by as much, so the edge is each expert's
+      own add-on, not listening. That is v2's finding again: the fine-tuning
+      carried the gain.
+    - Exploratory: backward stage2 → stage1 beat forward stage1 → stage2 by
+      +0.14 ± 0.12.
+    - Run length: the mean curves are flat from about epoch 10, and the
+      mean of epochs 26–30 is within 0.1 of epochs 16–20, either way. 48 of
+      225 best epochs landed at 26–30, about what a flat curve gives by chance
+      (1 in 5). 30 epochs stays.
+  - Phase 2, 2026-10-28: 2a, 2b and 2c, run in sequence, each its own MLflow
+    experiment. Its runs record commit c28ccdf with `git_dirty=true`, because
+    they were launched before the `--phase` change was committed. The
+    uncommitted changes were exactly the commit after c28ccdf ("Each phase
+    of the channel ladder its own MLflow experiment"), which touches only
+    the runner's experiment and tags, its tests and the docs.
 - Freeze everything after the write point, including each expert's output
   layer.
 - Zero-initialize the write.
