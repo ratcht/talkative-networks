@@ -133,11 +133,38 @@ Defaults:
       225 best epochs landed at 26–30, about what a flat curve gives by chance
       (1 in 5). 30 epochs stays.
   - Phase 2, 2026-10-28: 2a, 2b and 2c, run in sequence, each its own MLflow
-    experiment. Its runs record commit c28ccdf with `git_dirty=true`, because
-    they were launched before the `--phase` change was committed. The
-    uncommitted changes were exactly the commit after c28ccdf ("Each phase
-    of the channel ladder its own MLflow experiment"), which touches only
-    the runner's experiment and tags, its tests and the docs.
+    experiment. 300 runs, 20 arms × trial seeds 0–14, all finished, on the
+    same experts per trial seed as phase 1.
+    - Code: 2a, 2b and the first five arms of 2c record commit c28ccdf with
+      `git_dirty=true`, because they were launched before the `--phase`
+      change was committed. The uncommitted changes were the commit after
+      it, c16e895, which touches only the runner's experiment and tags, its
+      tests and the docs. The last three arms of 2c record c16e895, clean.
+    - Read as in phase 1: differences paired by trial seed, in accuracy
+      points, with 95% ranges and the trial seeds where the first arm is
+      ahead.
+    - **Level − `self`, forward stage2 → stage3:** −0.09 (2-encoder), −0.12
+      (2-decoder) and −0.10 (3), on 3 of 15 trial seeds each. Pooled over
+      the GELU levels it is −0.10 ± 0.06 (1 of 15). The same picking epochs
+      by joint_val loss. Attention is slightly worse than `self`, as at level 1.
+    - **Level − `self`, backward stage3 → stage1:** +0.05, +0.01 and −0.03;
+      pooled +0.01 ± 0.08 (8 of 15). No difference.
+    - **Level − MoE:** every level ahead, by 0.53–0.54 forward (11–12 of 15)
+      and 0.72–0.78 backward (13–14 of 15), as at level 1.
+    - The GELU levels add nothing: no GELU level differs from level 1 by more
+      than 0.05 with attention, either direction. So the r = 32 rule applies.
+    - Exploratory, the `mean` control (2c), pooled over the four levels:
+      - forward, `mean` − `self` is +0.00 ± 0.04, and attention − `mean`
+        −0.09 ± 0.07 (4 of 15);
+      - backward, `mean` − `self` is **+0.12 ± 0.06 (13 of 15; 15 of 15
+        picking by loss)**, and attention − `mean` is **−0.12 ± 0.05 (1 of
+        15)**. Backward level 1 with `mean`, 90.80, is the best arm run so
+        far.
+      - So backward, hearing the others' plain average helps a little, and
+        attention gives that back: choosing whom to listen to costs about as
+        much as hearing the others adds.
+    - Exploratory: backward beats forward at every level, by 0.18–0.25 (11–14
+      of 15).
 - Freeze everything after the write point, including each expert's output
   layer.
 - Zero-initialize the write.

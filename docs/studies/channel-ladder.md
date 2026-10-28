@@ -107,6 +107,19 @@ run in this order (user, 2026-10-28):
 Each phase's comparisons take level 1, its `self` control and the MoE from
 `channel-ladder-phase1`.
 
+**Phase 3: the width.** Phase 2's GELU levels added nothing at $r = 8$, so
+by the r = 32 rule they are rerun wider, at $r = 16$, 24 and 32 (user,
+2026-10-28), in that order, each its own phase: `3-r16`, `3-r24` and `3-r32`.
+At each width, levels 1 and 3 with `attention`, `self` and `mean`, at both
+chosen pairs: 12 arms per width. The MoE stays phase 1's, at $r = 8$.
+
+- Level 3 has both GELUs, so if it doesn't beat level 1 at some width, the
+  two versions of level 2 have nothing to explain there. If it does, they
+  run at that width.
+- `self` widens with the level, so level − `self` stays a comparison at equal
+  size. Level − MoE does not: at $r = 32$ the channel is up to 9× the gate.
+- Arms are labelled with their width, e.g. `level3-self-stage3-stage1-r24`.
+
 **Cost on the laptop**, one run at a time: about 35 s per forward run and 67 s
 per backward run. Phase 1 took about 3 hours; 2a is about 1 hour, 2b about 2
 and 2c about 2. If it drags, it moves to the lab machine, one run per GPU.
