@@ -95,7 +95,7 @@ METRICS = (
     "msg_norm",
     "Communication content",
     ("msg_norm/{part}/{site}",),
-    "Average size of what is sent (value), received (aggregated) and injected (injection).",
+    "Average size of what is sent (query, key, value), received (aggregated) and injected (injection).",
   ),
   Metric(
     "attn_entropy",
@@ -109,6 +109,12 @@ METRICS = (
     "Communication content",
     ("attn_top1/{site}",),
     "Each receiver's largest attention weight: 1/M is uniform, 1 is one sender.",
+  ),
+  Metric(
+    "qk_cos_gap",
+    "Communication content",
+    ("qk_cos_gap/{site}",),
+    "Cosine of each receiver's query with its best-matched key minus its worst's.",
   ),
   Metric(
     "routing_mode_share",
