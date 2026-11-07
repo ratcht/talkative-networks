@@ -176,12 +176,25 @@ class AttentionMixer(Mixer):
 
   def forward(
     self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
-  ) -> torch.Tensor:
+  ) -> tuple[torch.Tensor, torch.Tensor]:
     m, t = query.shape[1:3]
     q, k, v = (x.flatten(1, 2) for x in (query, key, value))  # (B, M*T, D)
     weights = (q @ k.transpose(1, 2) / math.sqrt(q.shape[-1])).softmax(-1)
     received = (weights @ v).unflatten(1, (m, t))
     return received, weights.unflatten(1, (m, t)).unflatten(3, (m, t))
+
+
+class RMSNormAttentionMixer(AttentionMixer):
+  """Attention with RMS-normed query and key (QK-norm)."""
+
+  def __init__(self, config: ChannelConfig):
+    super().__init__(config)
+    self.norm = nn.RMSNorm(config.key_dim, elementwise_affine=False)
+
+  def forward(
+    self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    return super().forward(self.norm(query), self.norm(key), value)
 
 
 class SelfMixer(Mixer):
@@ -297,6 +310,7 @@ MIXERS: dict[str, type[Mixer]] = {
   "attention": AttentionMixer,
   "self": SelfMixer,
   "mean": MeanMixer,
+  "rmsnorm_attention": RMSNormAttentionMixer,
 }
 DECODERS: dict[str, type[Decoder]] = {
   "linear_taper": LinearTaperDecoder,
