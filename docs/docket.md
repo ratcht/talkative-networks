@@ -101,6 +101,12 @@ Defaults:
   - DECISION (user, 2026-10-25): the ladder stops at level 3 for now. If the
     GELU levels add nothing at r = 8, rerun them at r = 32 before concluding
     the nonlinearity doesn't help, since r is also the GELU's width.
+  - DECISION (user, 2026-11-06): an `rmsnorm_attention` mixer (QK-norm, no
+    gain), because queries and keys grow in norm every epoch. It joins the
+    ladder's mixers.
+  - DECISION (user, 2026-11-06): log `msg_norm/query`, `msg_norm/key` and
+    `qk_cos_gap`, to tell whether attention sharpens through lengths or
+    directions.
   - Any mixer runs at any level. Which controls run at which levels is the
     study's design, not the ladder's (user, 2026-10-25); the proposal was
     `self` and `mean` at every level.
