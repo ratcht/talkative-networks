@@ -12,6 +12,7 @@ nav:
       - Channel ladder: studies/channel-ladder.md
       - QK-norm attention: studies/rmsnorm-attention.md
       - Joint vs individual loss: studies/individual-loss.md
+      - Untrained backbones: studies/untrained-backbones.md
 
 markdown_extensions:
   # generic mode hands math to MathJax rather than rendering it server-side, and

@@ -16,6 +16,9 @@ Docs for communicating ensembles of frozen experts.
 
 - [Channel ladder](studies/channel-ladder.md): how much each step up in a
   channel's complexity adds, one GELU at a time.
+- [Untrained backbones](studies/untrained-backbones.md): how accurate the
+  ensemble gets when only the channel trains and the experts are random
+  networks.
 
 The v2 pipeline (`backbone/`, `ensemble/`, `selection/`, `splits/`, `scripts/`)
 and its Aim metric glossary are on `main`.
