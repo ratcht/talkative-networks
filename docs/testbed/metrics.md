@@ -126,6 +126,7 @@ statement holds. $\operatorname{mean}_n$ averages over examples.
 | `msg_norm` | size of what is sent, received and injected | `injection` = 0 at step 0 |
 | `attn_entropy` | how evenly receivers spread their attention | between 0 and $\log M$ |
 | `attn_top1` | each receiver's largest attention weight | between $1/M$ and 1 |
+| `qk_cos_gap` | how far apart each receiver's query puts the senders, by direction | between 0 and 2 |
 | `routing_mode_share` | share of examples routed the most common way | — |
 | `self_attn_rate` | how often a receiver listens most to itself | — |
 | `route_flip_rate` | how much routing changed since the previous step | absent at step 0 |
@@ -424,13 +425,18 @@ These metrics describe what one exchange sends, how it is weighted and what is
 injected, independently of what the experts then do with it. They are logged
 per site, on joint_val. The five on attention and routing read the mixer's
 weights, and are logged only for a mixer that has them: `attention` does, the
-`self` and `mean` controls don't.
+`self` and `mean` controls don't. So are `qk_cos_gap` and `msg_norm`'s
+`query` and `key`.
 
 ### `msg_norm`
 
 The average size of what is sent, received and injected:
 
 $$
+\texttt{query} = \operatorname*{mean}_{n,i} \lVert q_{n,i} \rVert ,
+\qquad
+\texttt{key} = \operatorname*{mean}_{n,i} \lVert k_{n,i} \rVert ,
+\qquad
 \texttt{value} = \operatorname*{mean}_{n,i} \lVert v_{n,i} \rVert ,
 \qquad
 \texttt{aggregated} = \operatorname*{mean}_{n,r} \lVert m_{n,r} \rVert ,
@@ -475,6 +481,18 @@ Unlike the entropy, its scale does not depend on $M$. Read the two together:
 one dominant sender with a flat tail (high `attn_top1`, middling entropy) and
 weight split evenly between two senders (both middling) look alike in entropy
 alone.
+
+### `qk_cos_gap`
+
+How far apart each receiver's query puts the senders, by direction alone:
+
+$$
+\texttt{qk_cos_gap} = \operatorname*{mean}_{n,r} \left( \max_s \cos(q_{n,r}, k_{n,s}) - \min_s \cos(q_{n,r}, k_{n,s}) \right) ,
+$$
+
+between 0 and 2. Read it with `msg_norm`'s `query` and `key`: a falling
+`attn_entropy` with a flat gap and growing norms comes from the lengths, not
+the directions.
 
 ### `routing_mode_share`
 

@@ -76,6 +76,24 @@ $m_i$ is what expert $i$ received. With the `linear_taper` encoder and
 decoder, the softmax is the channel's only nonlinearity: with the weights
 $w_{ij}$ held fixed, the whole channel is linear in the experts' features.
 
+### Mixer: `rmsnorm_attention`
+
+Attention with each query and key RMS-normed first (QK-norm):
+
+$$
+\hat q_i = \frac{q_i}{\operatorname{RMS}(q_i)} ,
+\quad
+\hat k_j = \frac{k_j}{\operatorname{RMS}(k_j)} ,
+\qquad
+w_{ij} = \operatorname*{softmax}_j \frac{\hat q_i \cdot \hat k_j}{\sqrt{d_k}} ,
+\qquad
+m_i = \sum_j w_{ij} \, v_j ,
+$$
+
+with $\operatorname{RMS}(x) = \sqrt{\tfrac{1}{d_k} \sum x^2}$. Every logit
+lies in $[-\sqrt{d_k}, \sqrt{d_k}]$. The norm has no gain, so the mixer has no
+weights.
+
 ### Decoder: `linear_taper`
 
 Each expert turns what it received into $r$ numbers, the strengths of $r$

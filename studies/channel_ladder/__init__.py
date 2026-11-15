@@ -13,7 +13,7 @@ Each level is a pair of channel parts from testbed/communication:
 
 Level 0 is bagging, which is every run's step 0, so it has no entry. Any
 level runs with any of the study's mixers (MIXERS): attention, the channel's
-own, or one of its two controls, self and mean. The baseline that weighs the
+own, one of its two controls, self and mean, or rmsnorm_attention. The baseline that weighs the
 experts' answers instead of communicating is the soft-gated MoE with GATE
 (testbed/moe.py). Every part reads or writes through WIDTH, the r of the
 linear taper parts and of the gate.
@@ -38,7 +38,7 @@ LEVELS: dict[str, Level] = {
   "2-decoder": Level("linear_taper", "linear_taper_gelu"),
   "3": Level("linear_taper_gelu", "linear_taper_gelu"),
 }
-MIXERS = ("attention", "self", "mean")  # the channel's, then its controls
+MIXERS = ("attention", "self", "mean", "rmsnorm_attention")
 GATE = "linear_taper_gelu"
 WIDTH = 8
 

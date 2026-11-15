@@ -32,6 +32,7 @@ filelock==3.29.0
 fonttools==4.62.1
 fsspec==2026.3.0
 ghp-import==2.1.0
+graphviz==0.21
 greenlet==3.5.0
 h11==0.16.0
 idna==3.14
@@ -109,6 +110,7 @@ starlette==1.0.0
 sympy==1.14.0
 torch==2.11.0
 torchinfo==1.8.0
+torchview==0.2.7
 torchvision==0.26.0
 tornado==6.5.5
 tqdm==4.67.3

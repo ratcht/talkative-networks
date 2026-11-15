@@ -25,7 +25,12 @@ from testbed.metrics import (
   marginal_answer_shift,
 )
 from testbed.metrics.answers import answer_shift_kl
-from testbed.metrics.exchanges import InjectionSums, participation_ratio, routing
+from testbed.metrics.exchanges import (
+  InjectionSums,
+  cos_gap,
+  participation_ratio,
+  routing,
+)
 from testbed.metrics.optimisation import OptimisationMeter, component
 from testbed.metrics.registry import find
 from testbed.moe import GateConfig, build_gated
@@ -195,6 +200,13 @@ def test_injection_statistics_by_construction(make, expected):
   got = sums.result()
   for key, value in expected.items():
     assert got[key] == pytest.approx(value, abs=1e-9), key
+
+
+def test_qk_cos_gap_by_construction():
+  # (N, M, T, key_dim) with N = T = 1, M = 2
+  q = torch.tensor([[[[1.0, 0]], [[-1.0, 0]]]])
+  assert cos_gap(q, torch.tensor([[[[1.0, 1]], [[1.0, 1]]]])) == pytest.approx(0)
+  assert cos_gap(q, torch.tensor([[[[3.0, 0]], [[-1.0, 0]]]])) == pytest.approx(2)
 
 
 def test_routing_by_construction():

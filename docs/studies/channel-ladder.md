@@ -32,10 +32,11 @@ The study's architectural choices are in `studies/channel_ladder/__init__.py`.
 
 ### Mixers
 
-Any level runs with any of the study's three mixers
+Any level runs with any of the study's four mixers
 ([Channel](../testbed/channel.md) §2 and §4): `attention`, the channel's own,
-and its two controls, `self` and `mean`. Each control keeps every other part
-of the level, so a level minus its control is what communication adds.
+its two controls, `self` and `mean`, and `rmsnorm_attention`. Each control
+keeps every other part of the level, so a level minus its control is what
+communication adds.
 
 ### The MoE baseline
 

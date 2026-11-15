@@ -10,6 +10,7 @@ as it arrives; the statistics are still exact over the whole split.
 """
 
 import torch
+import torch.nn.functional as F
 from torch.special import xlogy
 
 from testbed.communication.ensemble import Trace
@@ -25,6 +26,8 @@ ZERO_RESID = 1e-6
 
 class ExchangeMeter:
   def __init__(self):
+    self.queries: list[torch.Tensor] = []
+    self.keys: list[torch.Tensor] = []
     self.values: list[torch.Tensor] = []
     self.received: list[torch.Tensor] = []
     self.weights: list[torch.Tensor] = []
@@ -32,6 +35,8 @@ class ExchangeMeter:
     self.injections: list[InjectionSums] = []
 
   def add(self, trace: Trace) -> None:
+    self.queries.append(trace.reading.sent.query)
+    self.keys.append(trace.reading.sent.key)
     self.values.append(trace.reading.sent.value)
     self.received.append(trace.reading.received)
     if trace.reading.weights is not None:
@@ -70,6 +75,12 @@ class ExchangeMeter:
     if not self.weights:  # a mixer without weights has no routing to read
       return out, None
     weights = torch.cat(self.weights)
+    queries, keys = torch.cat(self.queries), torch.cat(self.keys)
+    out |= {
+      "msg_norm/query": queries.norm(dim=-1).mean().item(),
+      "msg_norm/key": keys.norm(dim=-1).mean().item(),
+      "qk_cos_gap": cos_gap(queries, keys),
+    }
     routing_metrics, routes = routing(weights, pre, post, y, previous_routes)
     return out | attention(weights) | routing_metrics, routes
 
@@ -87,6 +98,13 @@ def attention(weights: torch.Tensor) -> dict[str, float]:
     "attn_entropy": -xlogy(weights, weights).sum(-1).mean().item(),
     "attn_top1": weights.max(-1).values.mean().item(),
   }
+
+
+def cos_gap(queries: torch.Tensor, keys: torch.Tensor) -> float:
+  """Each receiver's best-matched sender's cosine minus its worst's, averaged."""
+  q, k = (F.normalize(x.flatten(1, 2), dim=-1) for x in (queries, keys))
+  cos = q @ k.transpose(1, 2)  # (N, receivers, senders)
+  return (cos.amax(-1) - cos.amin(-1)).mean().item()
 
 
 def routing(

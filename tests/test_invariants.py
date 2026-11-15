@@ -172,6 +172,24 @@ def test_the_controls_hear_what_they_promise(mixer):
     assert encoder.value.weight.grad.abs().sum() > 0
 
 
+def test_rmsnorm_attention_ignores_the_scale_of_query_and_key():
+  features = [torch.randn(4, 32, 7, 7) for _ in range(3)]
+  plain, normed = (
+    build_channel(ChannelConfig(mixer=m), (32, 7, 7), (16, 14, 14), num_experts=3)
+    for m in ("attention", "rmsnorm_attention")
+  )
+  with torch.no_grad():
+    plain_before = plain.read(features).weights
+    normed_before = normed.read(features).weights
+    for channel in (plain, normed):
+      for encoder in channel.encoders:
+        for layer in (encoder.query, encoder.key):
+          layer.weight.mul_(10)
+          layer.bias.mul_(10)
+    assert not torch.allclose(plain.read(features).weights, plain_before, atol=1e-5)
+    assert torch.allclose(normed.read(features).weights, normed_before, atol=1e-5)
+
+
 def test_an_encoder_sends_one_message_per_expert():
   config = ChannelConfig()
   channel = build_channel(config, (16, 14, 14), (32, 7, 7), num_experts=2)
