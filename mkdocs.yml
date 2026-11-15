@@ -10,6 +10,7 @@ nav:
       - Docket: docket.md
   - Studies:
       - Channel ladder: studies/channel-ladder.md
+      - Degenerate cases: studies/degenerate-cases.md
 
 markdown_extensions:
   # generic mode hands math to MathJax rather than rendering it server-side, and

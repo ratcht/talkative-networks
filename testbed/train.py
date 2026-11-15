@@ -34,6 +34,7 @@ from testbed.metrics import (
   accuracy,
   answer_grid,
   answer_shift_kl,
+  each_expert_accuracy,
   expert_accuracy,
   joint_answer_shift,
   marginal_answer_shift,
@@ -155,6 +156,7 @@ def evaluate(
       "accuracy": accuracy(post, y, weights),
       "expert_accuracy": expert_accuracy(post, y),
     }
+    metrics |= prefix("expert_accuracy", each_expert_accuracy(post, y))
     metrics |= prefix("answer_grid", answer_grid(post, y, weights))
     metrics |= prefix(
       "joint_answer_shift", joint_answer_shift(pre[split], post, y, weights)

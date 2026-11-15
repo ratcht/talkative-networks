@@ -13,10 +13,11 @@ Each level is a pair of channel parts from testbed/communication:
 
 Level 0 is bagging, which is every run's step 0, so it has no entry. Any
 level runs with any of the study's mixers (MIXERS): attention, the channel's
-own, or one of its two controls, self and mean. The baseline that weighs the
-experts' answers instead of communicating is the soft-gated MoE with GATE
-(testbed/moe.py). Every part reads or writes through WIDTH, the r of the
-linear taper parts and of the gate.
+own, or one of its two controls, self and mean. Phase 4 also runs COSINE,
+attention that reads only the directions of the queries and keys. The baseline
+that weighs the experts' answers instead of communicating is the soft-gated
+MoE with GATE (testbed/moe.py). Every part reads or writes through WIDTH, the
+r of the linear taper parts and of the gate.
 """
 
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ LEVELS: dict[str, Level] = {
   "3": Level("linear_taper_gelu", "linear_taper_gelu"),
 }
 MIXERS = ("attention", "self", "mean")  # the channel's, then its controls
+# Not in MIXERS: the degenerate cases take their arms from that tuple.
+COSINE = "cosine_attention"
 GATE = "linear_taper_gelu"
 WIDTH = 8
 

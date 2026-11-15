@@ -207,3 +207,43 @@ for reference.
 | `spatial` | encoder | positions, tagged with a learned position embedding, weighed and summed into one summary |
 | `broadcast` | decoder | one value per channel, the same at every position |
 | `spatial` | decoder | each position combines its own features with the message |
+
+## 8. Attention on directions alone: `cosine_attention`
+
+Under `attention` (§2), an encoder can sharpen the softmax just by sending
+larger queries and keys. `cosine_attention` takes that away. It rescales every
+query and key to length $\sqrt{d_k}$, then applies the same softmax:
+
+$$
+\hat q_i = \sqrt{d_k} \, \frac{q_i}{\lVert q_i \rVert} ,
+\qquad
+\hat k_j = \sqrt{d_k} \, \frac{k_j}{\lVert k_j \rVert} ,
+\qquad
+w_{ij} = \operatorname*{softmax}_j \frac{\hat q_i \cdot \hat k_j}{\sqrt{d_k}}
+       = \operatorname*{softmax}_j \, \sqrt{d_k} \, \cos(q_i, k_j) .
+$$
+
+So a receiver's weights depend only on the angles between its query and the
+keys. $m_i = \sum_j w_{ij} v_j$ as before, and the values keep their sizes.
+
+$\sqrt{d_k}$ is the length a query would have if each of its numbers had
+variance 1, which is the case attention's division by $\sqrt{d_k}$ assumes.
+The length has to be chosen with care, because it sets how far the weights can
+go. With $M = 3$ and $d_k = 16$, when one key lines up with a receiver's query
+and the other two point the opposite way:
+
+| rescaled to | scores lie in | a receiver's largest weight can reach | lowest `attn_entropy` |
+|---|---|---|---|
+| $\sqrt{d_k}$ | $[-4, 4]$ | 0.9993 | 0.006 |
+| 1 | $[-0.25, 0.25]$ | 0.45 | 1.07 |
+
+At length 1, attention would be close to `mean` whatever the channel learned,
+so softer routing would prove nothing. At $\sqrt{d_k}$ a receiver can still
+settle on one sender, as sharply as `attention` does at level 1 (entropy about
+0.01), but only by direction. The lengths are fixed: a learned scale would
+bring back what this mixer removes.
+
+The mixer has no weights, like `attention`. So on the same trial seed the two
+start from identical channels, and a difference between them is the
+normalising. `msg_norm` reads the queries and keys as the encoders sent them,
+before this rescaling ([Metrics](metrics.md)).

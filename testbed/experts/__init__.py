@@ -10,6 +10,8 @@ from testbed.experts.schemes import (
   Scheme,
   SeedOnly,
   TrainedExpert,
+  Untrained,
+  untrained_expert,
 )
 
 __all__ = [
@@ -25,6 +27,8 @@ __all__ = [
   "Scheme",
   "SeedOnly",
   "TrainedExpert",
+  "Untrained",
   "build",
   "get_pool",
+  "untrained_expert",
 ]

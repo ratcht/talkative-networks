@@ -24,8 +24,10 @@ experts, so they compare trial by trial.
 """
 
 import argparse
+import copy
 import subprocess
-from dataclasses import asdict
+from collections.abc import Callable
+from dataclasses import asdict, replace
 from statistics import mean
 
 from testbed.communication import (
@@ -33,10 +35,11 @@ from testbed.communication import (
   ENCODERS,
   MIXERS,
   ChannelConfig,
+  CommunicatingEnsemble,
   Exchange,
   build_ensemble,
 )
-from testbed.data import DATASETS, REPO_ROOT, load
+from testbed.data import DATASETS, REPO_ROOT, Data, load
 from testbed.metrics import description
 from testbed.moe import GATES, GateConfig, build_gated
 from testbed.experts import (
@@ -45,10 +48,14 @@ from testbed.experts import (
   ClassSkew,
   IndependentScheme,
   NegativeCorrelation,
+  Pool,
   Redundant,
   Scheme,
   SeedOnly,
+  TrainedExpert,
+  Untrained,
   get_pool,
+  untrained_expert,
 )
 from testbed.results import epochs_around_best, median_around_best
 from testbed.seeds import derive
@@ -60,6 +67,7 @@ SCHEMES = {
   "seed_only": lambda args: SeedOnly(),
   "class_skew": lambda args: ClassSkew(args.alpha),
   "negative_correlation": lambda args: NegativeCorrelation(args.lam),
+  "untrained": lambda args: Untrained(),
 }
 
 
@@ -74,8 +82,33 @@ def make_scheme(args: argparse.Namespace) -> Scheme:
   return Redundant(scheme, args.copies)
 
 
+def group_experts(
+  pool: Pool,
+  group: list[int],
+  untrained_members: int,
+  arch: str,
+  data: Data,
+  pool_seed: int,
+) -> list[TrainedExpert]:
+  """The group's experts, each a model of its own, so a group can hold one
+  expert more than once. The last `untrained_members` are swapped for the same
+  places' experts with no training; the pool on disk doesn't change, so the
+  others stay the experts every other arm on this trial seed uses."""
+  experts = [
+    replace(pool.experts[i], model=copy.deepcopy(pool.experts[i].model)) for i in group
+  ]
+  for place in range(len(group) - untrained_members, len(group)):
+    experts[place] = untrained_expert(arch, data, pool_seed, group[place])
+  return experts
+
+
 def check_flags(args: argparse.Namespace) -> None:
   """Combinations of flags that would build something other than asked."""
+  if not 0 <= args.untrained_members < args.experts:
+    raise SystemExit(
+      f"--untrained-members must leave a trained expert in the group of "
+      f"{args.experts}; for a group with none, use --scheme untrained"
+    )
   if args.gate and args.exchange:
     raise SystemExit(
       "--gate weighs the experts instead of exchanges; give one or the other"
@@ -158,6 +191,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     default=None,
     help="defaults to first if the pool is the group",
   )
+  experts.add_argument(
+    "--untrained-members",
+    type=int,
+    default=0,
+    help="how many experts, from the end of the group, to swap for the same "
+    "experts with no training",
+  )
 
   comm = p.add_argument_group("communication")
   comm.add_argument(
@@ -170,7 +210,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     choices=MIXERS,
     default=ChannelConfig.mixer,
     help="self and mean are the controls: each expert hears only itself, or "
-    "the plain average of every expert",
+    "the plain average of every expert. cosine_attention is attention that "
+    "reads only the directions of the queries and keys",
   )
   comm.add_argument("--decoder", choices=DECODERS, default=ChannelConfig.decoder)
   comm.add_argument("--key-dim", type=int, default=ChannelConfig.key_dim)
@@ -211,7 +252,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   return p.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(
+  argv: list[str] | None = None,
+  adjust: Callable[[CommunicatingEnsemble, Data], None] | None = None,
+) -> None:
+  """`adjust` lets a study change the built ensemble before it trains, for an
+  intervention that isn't a part. The run's tags should say what it did."""
   args = parse_args(argv)
   check_flags(args)  # before loading anything, so bad flags fail fast
   tags = extra_tags(args) | code_version()
@@ -240,11 +286,12 @@ def main(argv: list[str] | None = None) -> None:
 
   accuracies, gains = [], []
   for trial_seed in args.trial_seeds:
-    pool = get_pool(
-      scheme, args.arch, data, pool_size, derive(trial_seed, "pool"), budget
-    )
+    pool_seed = derive(trial_seed, "pool")
+    pool = get_pool(scheme, args.arch, data, pool_size, pool_seed, budget)
     group = selector.select(pool, args.experts, derive(trial_seed, "group"))
-    experts = [pool.experts[i] for i in group]
+    experts = group_experts(
+      pool, group, args.untrained_members, args.arch, data, pool_seed
+    )
     if gate:
       model = build_gated(
         [e.model for e in experts], gate, data.input_shape, derive(trial_seed, "gate")
@@ -258,6 +305,8 @@ def main(argv: list[str] | None = None) -> None:
         args.rounds,
         derive(trial_seed, "channel"),
       )
+      if adjust:
+        adjust(model, data)
 
     tracker = (
       NullTracker()
@@ -290,6 +339,7 @@ def main(argv: list[str] | None = None) -> None:
             "digest": pool.digest,
             "size": pool_size,
             "group": group,
+            "untrained_members": args.untrained_members,
           },
           "exchanges": [(ex.read, ex.write) for ex in exchanges],
           "rounds": args.rounds,

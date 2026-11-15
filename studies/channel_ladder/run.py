@@ -13,6 +13,7 @@ of three kinds:
   uv run python -m studies.channel_ladder.run --phase 2 --moe stage3 --arm moe-stage3 \\
     --trial-seeds 0 1 2
 
+studies/channel_ladder/phase4.py prints this command for every arm of phase 4.
 Every run belongs to a phase of the study (--phase), and each phase is its own
 MLflow experiment, channel-ladder-phase<PHASE>, so no experiment piles up
 every arm the study ever ran.
@@ -27,7 +28,7 @@ and a flag given here overrides a default.
 import argparse
 import sys
 
-from studies.channel_ladder import GATE, LEVELS, MIXERS, STUDY, WIDTH
+from studies.channel_ladder import COSINE, GATE, LEVELS, MIXERS, STUDY, WIDTH
 from testbed import run
 
 TRIAL_SEEDS = range(15)  # every arm runs on the same list, so arms pair up
@@ -62,7 +63,9 @@ def flags_for_testbed(argv: list[str]) -> list[str]:
     metavar=("READ", "WRITE"),
     help="a level's one exchange",
   )
-  p.add_argument("--mixer", choices=MIXERS, help=f"a level's; {MIXERS[0]} by default")
+  p.add_argument(
+    "--mixer", choices=(*MIXERS, COSINE), help=f"a level's; {MIXERS[0]} by default"
+  )
   p.add_argument(
     "--phase",
     required=True,

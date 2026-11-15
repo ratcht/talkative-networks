@@ -22,8 +22,10 @@ The `linear_taper` encoders and decoders are two linear layers through a
 narrow width that read and write the whole feature map, so they never pool or
 broadcast; `linear_taper_gelu` adds a GELU between the two. The `self` and
 `mean` mixers are controls: the same channel without communication, or without
-choosing whom to listen to. `pooled`, `spatial` and `broadcast` make spatial
-assumptions. docs/testbed/channel.md defines every part.
+choosing whom to listen to. `cosine_attention` is attention that reads only
+the directions of the queries and keys, not their sizes. `pooled`, `spatial`
+and `broadcast` make spatial assumptions. docs/testbed/channel.md defines every
+part.
 
 For now every encoder sends exactly one message per expert
 (MESSAGES_PER_EXPERT). The mixer and decoders already handle any T, so
@@ -56,6 +58,9 @@ class Message:
   query: torch.Tensor  # (B, T, key_dim) what the sender wants to hear about
   key: torch.Tensor  # (B, T, key_dim) what the message is about
   value: torch.Tensor  # (B, T, value_dim) what it says
+  # (B, T, width) what all three were built from, for an encoder that reads
+  # its features into a shared set of numbers; the metrics read it
+  readings: torch.Tensor | None = None
 
 
 class Encoder(nn.Module, ABC):
@@ -117,7 +122,9 @@ class LinearTaperEncoder(Encoder):
     readings = self.read(features.flatten(1)).unsqueeze(1)  # (B, 1, width)
     if self.gelu:
       readings = F.gelu(readings)
-    return Message(self.query(readings), self.key(readings), self.value(readings))
+    return Message(
+      self.query(readings), self.key(readings), self.value(readings), readings
+    )
 
 
 class LinearTaperGELUEncoder(LinearTaperEncoder):
@@ -171,17 +178,35 @@ class AttentionMixer(Mixer):
   each expert's own included. With M = 2, leaving self out would give each
   receiver one sender and a softmax stuck at 1 (TarMAC; v2's ensemble/communicative/bus.py, on main)."""
 
+  normalised = False
+
   def __init__(self, config: ChannelConfig):
     super().__init__()
 
   def forward(
     self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
-  ) -> torch.Tensor:
+  ) -> tuple[torch.Tensor, torch.Tensor]:
     m, t = query.shape[1:3]
     q, k, v = (x.flatten(1, 2) for x in (query, key, value))  # (B, M*T, D)
+    if self.normalised:
+      q, k = (F.normalize(x, dim=-1) * math.sqrt(x.shape[-1]) for x in (q, k))
     weights = (q @ k.transpose(1, 2) / math.sqrt(q.shape[-1])).softmax(-1)
     received = (weights @ v).unflatten(1, (m, t))
     return received, weights.unflatten(1, (m, t)).unflatten(3, (m, t))
+
+
+class CosineAttentionMixer(AttentionMixer):
+  """The attention mixer reading only the directions of the queries and keys.
+  It rescales each to length sqrt(key_dim), the length it would have if each
+  of its numbers had variance 1, which is what attention's sqrt(key_dim)
+  assumes. A weight is then a softmax of sqrt(key_dim) times a cosine, so an
+  encoder can't sharpen the attention by making its messages larger. It can
+  still settle on one sender by direction alone: at the default key_dim of 16,
+  with 3 experts, a receiver's largest weight can reach 0.9993. At unit length
+  it couldn't pass 0.45, so the attention would be soft by construction. Like
+  `attention`, it has no weights of its own."""
+
+  normalised = True
 
 
 class SelfMixer(Mixer):
@@ -295,6 +320,7 @@ ENCODERS: dict[str, type[Encoder]] = {
 }
 MIXERS: dict[str, type[Mixer]] = {
   "attention": AttentionMixer,
+  "cosine_attention": CosineAttentionMixer,
   "self": SelfMixer,
   "mean": MeanMixer,
 }
@@ -325,10 +351,12 @@ class Channel(nn.Module):
           f"an encoder sent {message.value.shape[1]} messages; "
           f"each expert sends {MESSAGES_PER_EXPERT} for now"
         )
+    has_readings = all(m.readings is not None for m in messages)
     sent = Message(
       torch.stack([m.query for m in messages], dim=1),
       torch.stack([m.key for m in messages], dim=1),
       torch.stack([m.value for m in messages], dim=1),
+      torch.stack([m.readings for m in messages], dim=1) if has_readings else None,
     )
     received, weights = self.mixer(sent.query, sent.key, sent.value)
     return Reading(sent, weights, received)

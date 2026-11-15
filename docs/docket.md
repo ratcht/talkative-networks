@@ -165,6 +165,230 @@ Defaults:
         much as hearing the others adds.
     - Exploratory: backward beats forward at every level, by 0.18–0.25 (11–14
       of 15).
+  - Phase 3, the width, 2026-10-28/29: levels 1 and 3 with `attention`,
+    `self` and `mean` at both pairs, at r = 16, 24 and 32, each its own
+    experiment (`channel-ladder-phase3-r16`, ...). 540 runs, all finished, all
+    from commit 9ab5621 with a clean tree, on the same experts per trial seed
+    as phases 1 and 2. Read beside r = 8 from phases 1 and 2, as before.
+    - Stable at lr 1e-3 at every width: no NaN, and joint_val wobbles only a
+      little more as r grows (backward, a median range of 0.72 points after
+      epoch 5 at r = 8 and 0.88 at r = 32). Two forward level 1 runs (r = 16
+      seed 2, r = 24 seed 12) dipped about 3 points for one epoch and
+      recovered at the next.
+      - Counting every single-epoch dip of more than 0.5 below bagging after
+        epoch 5 gives ten runs, all forward level 1 with `attention` or
+        `mean` at r ≥ 16, on trial seeds 2 and 12. None are `self` runs and
+        none are level 3. Each is one epoch between 16 and 28, and the
+        5-epoch median absorbs it.
+    - **Level − `self` stays at or below zero at every width.** Forward,
+      level 1 is −0.04, −0.08, −0.08 and −0.15 at r = 8, 16, 24 and 32 (1 of
+      15 at r = 32), and level 3 is −0.08 to −0.11. Backward, both are within
+      ±0.10 of zero at every width, under either way of picking epochs.
+    - **The GELU doesn't help at any width either.** Level 3 − level 1 with
+      attention is −0.03 to +0.10 forward and −0.05 to −0.12 backward. With
+      `self`, backward, the GELU costs 0.13–0.16 at r ≥ 16 (3–5 of 15). The
+      r = 32 rule has run, and the nonlinearity, as the ladder places it, adds
+      nothing from r = 8 to 32.
+    - **Width helps backward, communication or not.** Level 1 `self` gains
+      0.09, 0.13 and 0.20 at r = 16, 24 and 32 over r = 8 (14 of 15 at
+      r = 32), and level 1 with attention about 0.15 at each. Forward, width
+      changes nothing.
+    - Level − MoE grows backward with the width, from 0.76 to 0.93, but the
+      channel grows with it (to 9× the gate), and `self` grows as much. It
+      isn't communication.
+      - Added 2026-11-02: the gate at r = 16, 24 and 32 (`moe-stage3-r16`,
+        `-r24`, `-r32`, 45 runs in phase 3's experiments, laptop, from
+        uncommitted code saved in `cache/channel_ladder_phase3_gate/`; the
+        gate's own code is unchanged and every trial seed's `pool.digest`
+        matches). Wider gates gain nothing: +0.05, +0.02 and +0.04 over r = 8
+        (± 0.07–0.10), and +0.03 to +0.04 on test over all 30 epochs, while
+        their training accuracy rises from 92.9 to 93.9. At equal r, channel −
+        gate, levels 1 and 3 and all mixers pooled, is +0.50 to +0.59 forward
+        and +0.81 to +0.90 backward (15 of 15 backward at r ≥ 16).
+    - Exploratory, backward `mean` − `self` (levels 1 and 3 pooled) is +0.12
+      at r = 8 and 16 under both rules. At r = 24 and 32 it is +0.02 and
+      +0.01 picking epochs by joint_val accuracy, but +0.13 and +0.16 (12–13
+      of 15) picking by joint_val loss. So the lead is weaker than phase 2
+      suggested, and at the larger widths it depends on the rule.
+      Attention − `mean` shrinks from −0.16 at r = 8 to about −0.05.
+    - The best arms are backward level 1 with `mean` at r = 16 and 32
+      (90.88) and with `self` at r = 32 (90.86).
+  - Phase 4, the size of the queries and keys, 2026-11-01. 90 runs, 6 arms ×
+    trial seeds 0–14, forward stage2 → stage3 at r = 8, all finished, no NaN,
+    on the same experts per trial seed as phase 1 (checked by `pool.digest` on
+    every run). Its rule, fixed before any run, is in
+    docs/studies/channel-ladder.md.
+    - Code and machine: the lab machine, one worker per GPU, 14 minutes.
+      Commit 9ab5621 with `git_dirty=true`. The exact code is in
+      `cache/channel_ladder_phase4/`: `code_head.txt`, `code_diff.patch` and
+      `code_untracked.tgz`.
+    - **Size is what differs.** Queries and keys are about 31 at level 1 and
+      49 at `2-decoder`, against 6 at `2-encoder` and 7.5 at level 3. Each
+      linear encoder is ahead of each GELU one on 15 of 15. Across the 60
+      attention runs, the rank correlation of entropy with query × key is
+      −0.95, the same as it was with message size.
+    - **Taking size away ends the wire.** Level 1 with `cosine_attention`
+      minus level 1 with `attention`: entropy +0.81 ± 0.02 (15 of 15), from
+      0.006 to 0.82; mode share −0.67 ± 0.10 (0 of 15), from 0.88 to 0.21;
+      `attn_top1` from 0.997 to 0.63.
+    - **It reaches the GELU arms and passes them.** They read entropy 0.51 and
+      0.39, and mode share 0.63 and 0.72. How far past depends on the length
+      the mixer rescales to.
+    - **Accuracy holds.** Test +0.01 ± 0.10 (5 of 15). At epochs 21–30, +0.04
+      ± 0.11 on test and −0.05 ± 0.12 on joint_val; over all 30 epochs, +0.05
+      ± 0.06 and +0.00 ± 0.08. The loss is a little worse on both, +0.007 ±
+      0.006 on test and +0.007 ± 0.005 on joint_val.
+    - **So by the rule, the GELU's softer routing is scale**, and scale is
+      nearly all of it. With size gone from both, `2-encoder` − level 1 is
+      +0.06 ± 0.03 in entropy (14 of 15), down from +0.51 ± 0.13, and −0.04 ±
+      0.02 in `attn_top1`, down from −0.24 ± 0.07. Mode share flips, from
+      −0.26 ± 0.18 to +0.14 ± 0.10 (13 of 15). This comparison doesn't depend
+      on the length, so a little is left that isn't size.
+    - Exploratory:
+      - **Size accounts for how sharp each image's weights are.** Give every
+        query and key a random direction and the logged size, with nothing
+        fitted, and the entropy comes out roughly right: 0.87 for
+        `cosine_attention` (seen 0.82 and 0.88), 0.48 for `2-encoder` (0.51),
+        0.30 for level 3 (0.39), 0.02 for level 1 (0.006) and 0.01 for
+        `2-decoder` (0.002). Entropy can't say who wins, though, so this says
+        nothing about the routing's choices.
+      - **Softer routing isn't better routing.** Without size, training leaves
+        routing about where the untrained channel has it at step 0. Level 1
+        goes from entropy 0.88 to 0.82, `attn_top1` 0.59 to 0.63 and mode
+        share 0.26 to 0.21 (−0.05 ± 0.10), and `2-encoder` doesn't move. The
+        routing isn't random: mode share is 0.20 against 0.04 for a fresh draw
+        on every image, and `route_flip_rate` 0.18 against 0.67. Each receiver
+        leans towards one sender, at 44%, but it already leaned at step 0, at
+        48%, and only 16 of 45 receivers keep that favourite (15 by chance).
+        In no arm is the sender heard more often right than at step 0:
+        `routed_correct/all` is 84.3 to 85.6 (+1.3 ± 1.7) with
+        `cosine_attention` and 84.5 to 84.1 (−0.4 ± 1.5) with `attention`.
+      - **Starved gradient wasn't what kept routing from improving.** At epoch
+        30, level 1's query and key get 9–11× the gradient with
+        `cosine_attention` (0.09 against 0.01), with the result above.
+      - **What softer routing does change.** Receivers hear more
+        (`msg_rank_aggregated` 4.7 to 7.7, 15 of 15), and routes move more
+        between epochs (`route_flip_rate` 0.04 to 0.22, 14 of 15).
+      - **The deficit to `self` stays.** Over all 30 epochs on joint_val,
+        `cosine_attention` − `self` is −0.11 ± 0.04 and `attention` − `self`
+        −0.12 ± 0.06. On test they are −0.06 ± 0.04 and −0.11 ± 0.05. So the
+        wire isn't what costs attention. `cosine_attention` − `mean` is −0.04 ±
+        0.04 on test and −0.04 ± 0.03 on joint_val. `self` and `mean` here are
+        the laptop's runs.
+      - **What grows is the readings, not the heads.** In the first epoch,
+        queries and keys grow about ninefold in every arm, while the steps
+        logged for their heads allow at most 1.3×. Value grows with them, query
+        ÷ value staying near 0.5, the ratio of untrained heads, and `self`'s
+        value grows fivefold though its query and key heads get no gradient.
+        After epoch 1 queries and keys stay at 15 with `cosine_attention` and
+        reach 37 with `attention`; at `2-encoder` both mixers end near 5. That
+        later growth is in senders nobody hears: at level 1 they go from 17 to
+        65, while well-heard senders stay near 14 (the least heard is the
+        larger on 15 of 15). What drives the readings is open. Rescaling
+        queries and keys doesn't make routing
+        independent of the readings' size: the heads have biases, so at step 0
+        readings ×5 changes the top sender on 28% of image-receiver pairs,
+        though only 1.5% after epoch 1 (one trial seed). Phase 5 found the
+        biases aren't how the readings grow.
+      - **Who each receiver hears.** At level 1, a receiver gives its three
+        senders 94%, 6% and 0.3% with `attention`, and 44%, 32% and 24% with
+        `cosine_attention`. All three receivers share a favourite on only 3 of
+        15 trial seeds. At the linear encoders the favourite is almost never
+        the sender with the largest key: 1 of 45 receivers at level 1 and 3 of
+        45 at `2-decoder`, against 15 by chance, though keys differ about 6×
+        between experts. Unexplained.
+      - **The machine.** The four `attention` arms on the lab minus the same
+        arms on the laptop are −0.01 ± 0.10, +0.04 ± 0.09, −0.07 ± 0.13 and
+        −0.08 ± 0.10, so results from the two compare. Each pair starts from
+        the same step 0 and parts within the first epoch. One trial seed's
+        difference then has a spread of 0.16–0.23 with nothing changed but
+        the GPU, about the same as level 1 between its two mixers (0.17). So
+        most of a paired difference's noise is the training path, and only
+        more trial seeds reduce it.
+    - Proposed next, not run (2026-11-02): **do `attention`'s choices carry
+      anything?** The report's finding 5 used only whether the sender heard is
+      right, and the user pointed out that a partner can help without being
+      right. An exploratory pass over this phase's `attn_heard` is in
+      `cache/channel_ladder_phase4/analysis/complementarity/`, kept out of the
+      findings until something firmer exists. Complementarity in features
+      couldn't be measured there, and the lean towards partners whose answers
+      complement the receiver is weak. Firmer tests, on exact lab replays at
+      test time:
+      - Give each image another image's routing weights: do choices per image
+        matter? Forward `attention` is a fixed wire, so this bites only where
+        routing is soft.
+      - Swap each receiver's weights between its two partners: does its
+        standing preference matter? This moves the decoder off what it
+        trained on, so a drop alone wouldn't show the choice was informed.
+  - Phase 5, why queries and keys grow, 2026-11-02. 135 runs, 9 arms × trial
+    seeds 0–14, level 1, forward stage2 → stage3 at r = 8, all finished, no
+    NaN, on the same experts per trial seed as phase 4. Its rule, fixed before
+    any run, is in docs/studies/channel-ladder.md. By that rule **neither the
+    jump nor the later growth is isolated**: of its six tests only 4 held.
+    - Code and machine: the lab machine, one worker per GPU, 20 minutes. Commit
+      9ab5621 with `git_dirty=true`. The exact code and the analysis are in
+      `cache/channel_ladder_phase5/`.
+    - The new logging leaves training alone: the `attention` and
+      `cosine_attention` references match phase 4's test curves at every epoch
+      on 15 of 15 trial seeds. So on one machine a run repeats exactly, and
+      the rerun noise above is all between GPUs.
+    - The heads don't grow. Under `self` their weights don't change at all,
+      while the query goes from 1.75 to 9.3 in epoch 1.
+    - **1 fails: the jump survives centring.** It stays at ×5.3 with `self` and
+      ×7.0 with `attention`, below ×2 on 0 of 15, against ×6.0 and ×10 at the
+      references. The share of the readings common to every image goes from
+      0.75 to 0.02, and the part that differs between images jumps just as far
+      either way (×5.4 with `self`). So the average image isn't behind it.
+    - **2 fails: the wire weakens but stays sharp.** Centred `attention` has an
+      entropy of 0.24 against the 0.5 asked (reference 0.006). See below for
+      what did change.
+    - **3 fails: the read layer has to learn.** Frozen readings are −0.21 ±
+      0.15 on test (3 of 15) and −0.21 ± 0.13 on joint_val at epochs 21–30,
+      though level with the reference at epoch 1 (+0.01 ± 0.34), and they make
+      no wire (entropy 1.03). This tests whether the read layer must train,
+      not whether readings must be large.
+    - **4 holds, with a caveat.** With routing's gradient cut at the readings,
+      each run's least-heard sender goes ×0.85 from epoch 1 to 30, against
+      ×3.23 at the reference, with accuracy at +0.01 ± 0.08. But the cut also
+      stops the wire (entropy 0.27, mode share 0.30), so that sender is heard
+      14%, not 0%. It shows the cut stops the runaway, not that routing pushes
+      unheard senders in particular.
+    - **5 fails narrowly: the brake falls short.** With its value gradient cut,
+      expert 0 ends at ×2 its larger partner or more, and still heard, on 10 of
+      15, median ×2.24. Over the run the median is ×1.9, ×3.3, ×4.1, ×3.0 and
+      ×2.2 at epochs 1, 5, 10, 20 and 30. It also stops being heard: 8%,
+      against 33% at the reference, so this isn't the clean case of a sender
+      that is heard but unbraked.
+    - **6: the biases aren't the mechanism.** With no head biases routing can't
+      depend on the size of the readings at all, and expert 0 runs away the
+      same: ×2.18, 8 of 15, and within 15% of the arm with biases at every
+      epoch read. The test's "yes" needed 5 to hold, so it has none.
+    - Exploratory:
+      - **Size sets the sharpness.** Over 300 (run, epoch) points of the four
+        arms with plain `attention`, the rank correlation of entropy with
+        query × key is −0.98.
+      - **Who wins is a different matter.** Centring takes mode share from 0.88
+        to 0.25 while the top weight stays at 0.90: sharp, but no longer the
+        same wiring on every image. Across arms mode share stays near 0.25
+        until queries are over 80% common to every image, then climbs (0.41,
+        then 0.73 above 90%). But frozen readings and untrained channels are
+        80% common at a mode share of 0.23–0.28, so a large common part looks
+        necessary, not sufficient.
+      - **The extra size isn't needed.** Readings end at 11 with routing's
+        gradient cut, against 34, at the same accuracy.
+      - **Routing's extra push is in the common part.** At epoch 1 that part
+        grows ×12 with `attention` and ×6.5 with `self`, while the part that
+        differs between images grows ×6.3 and ×5.4.
+      - **Centring costs later on.** The loss at epochs 26–30 is worse by 0.05
+        on test and 0.04 on joint_val with `attention`, and by 0.04 with
+        `self`. Accuracy at epochs 21–30 is −0.20 ± 0.13 and −0.24 ± 0.18 with
+        `attention`, and −0.02 ± 0.07 and −0.16 ± 0.08 with `self`.
+    - Proposed next, not run: phase 5's fallback for the jump, `self` with SGD
+      and with a larger `read` init. An untested candidate is that random
+      templates start nearly at right angles to stage 2's features, so a small
+      turn raises every reading several times over while the weights barely
+      grow (×1.3 in epoch 1). Centring can't prevent that. The check is each
+      template's cosine with the features at step 0 and at epoch 1.
 - Freeze everything after the write point, including each expert's output
   layer.
 - Zero-initialize the write.

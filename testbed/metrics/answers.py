@@ -28,6 +28,12 @@ def expert_accuracy(post: torch.Tensor, y: torch.Tensor) -> float:
   return rate(post.argmax(-1) == y[:, None])
 
 
+def each_expert_accuracy(post: torch.Tensor, y: torch.Tensor) -> dict[str, float]:
+  """expert_accuracy for each expert on its own."""
+  right = (post.argmax(-1) == y[:, None]).float().mean(0)
+  return {f"expert{i}": share.item() for i, share in enumerate(right)}
+
+
 def answer_grid(
   post: torch.Tensor, y: torch.Tensor, weights: torch.Tensor | None = None
 ) -> dict[str, float]:

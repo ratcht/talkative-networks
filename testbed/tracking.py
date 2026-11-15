@@ -5,6 +5,8 @@ MLflow is the backend: one SQLite file at the repo root, artifacts next to it.
 NullTracker lets tests and quick checks run without it.
 
   uv run mlflow ui --backend-store-uri sqlite:///mlflow.db   # from the repo root; port 5000
+
+Runs made on another machine come in through testbed/merge_runs.py.
 """
 
 from typing import Protocol

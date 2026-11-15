@@ -95,6 +95,13 @@ def fit(arch: str, data: Data, recipe: Recipe, budget: Budget) -> Expert:
   return model.eval()
 
 
+def untrained_expert(arch: str, data: Data, pool_seed: int, i: int) -> TrainedExpert:
+  """Expert i of a pool with no training at all. SeedOnly, ClassSkew and
+  NegativeCorrelation start expert i from these very weights."""
+  model = new_expert(arch, data, derive(pool_seed, "expert", i))
+  return TrainedExpert(model.eval(), {"untrained": True})
+
+
 @dataclass(frozen=True)
 class SeedOnly(IndependentScheme):
   """Experts differ only by seed: initialisation and batch order."""
@@ -162,6 +169,20 @@ class Redundant(IndependentScheme):
       for i, r in enumerate(base)
       for c in range(self.copies)
     ][:size]
+
+
+@dataclass(frozen=True)
+class Untrained(Scheme):
+  """Experts with random weights: nothing is learned and no data is seen, so
+  the budget changes nothing."""
+
+  def config(self) -> dict:
+    return {"name": "untrained"}
+
+  def train_pool(
+    self, arch: str, data: Data, size: int, seed: int, budget: Budget
+  ) -> list[TrainedExpert]:
+    return [untrained_expert(arch, data, seed, i) for i in range(size)]
 
 
 @dataclass(frozen=True)

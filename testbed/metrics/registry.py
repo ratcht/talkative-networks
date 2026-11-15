@@ -54,8 +54,9 @@ METRICS = (
   Metric(
     "expert_accuracy",
     "Task performance",
-    ("{split}/expert_accuracy",),
-    "Share of the experts' own answers that are correct, after communication.",
+    ("{split}/expert_accuracy", "{split}/expert_accuracy/expert{i}"),
+    "Share of the experts' own answers that are correct, after communication, "
+    "over all experts and for each expert.",
   ),
   Metric(
     "answer_grid",
@@ -94,8 +95,17 @@ METRICS = (
   Metric(
     "msg_norm",
     "Communication content",
-    ("msg_norm/{part}/{site}",),
-    "Average size of what is sent (value), received (aggregated) and injected (injection).",
+    ("msg_norm/{part}/{site}", "msg_norm/{part}/expert{i}/{site}"),
+    "Average size of what is sent (value), received (aggregated) and injected "
+    "(injection), and of the queries, keys and readings as the encoders made "
+    "them (query, key, reading), over all experts and for each expert.",
+  ),
+  Metric(
+    "msg_spread",
+    "Communication content",
+    ("msg_spread/{part}/{site}", "msg_spread/{part}/expert{i}/{site}"),
+    "Share of what the encoders make that differs between images: the value, "
+    "query, key and readings. 0 is the same for every image.",
   ),
   Metric(
     "attn_entropy",
@@ -109,6 +119,13 @@ METRICS = (
     "Communication content",
     ("attn_top1/{site}",),
     "Each receiver's largest attention weight: 1/M is uniform, 1 is one sender.",
+  ),
+  Metric(
+    "attn_heard",
+    "Communication content",
+    ("attn_heard/expert{i}/from{i}/{site}",),
+    "Who each receiver hears: the share of its attention on each sender, "
+    "averaged over examples. Each receiver's shares sum to 1.",
   ),
   Metric(
     "routing_mode_share",
@@ -179,6 +196,16 @@ METRICS = (
       "update_ratio/gate.{part}",
     ),
     "How far one optimiser step moves each part, relative to its size.",
+  ),
+  Metric(
+    "weight_norm",
+    "Training dynamics",
+    (
+      "weight_norm/total",
+      "weight_norm/{component}/ex{e}",
+      "weight_norm/gate.{part}",
+    ),
+    "Size of each part's weights, after each epoch.",
   ),
 )
 
