@@ -332,7 +332,7 @@ $$
 | Self-Routing | +2.59 | +2.76 | +0.18 ± 0.03 |
 | Mean-Routing | +2.68 | +2.75 | +0.07 ± 0.05 |
 
-*Gain over bagging in test accuracy (percentage points), pooled: each seed is
+*Gain over bagging in test accuracy (percentage points). Each seed is
 averaged over the four direction × architecture settings, then averaged over
 seeds. A gain over bagging carries bagging's own seed spread (SE ≈ 1.25). The
 paired difference in the last column removes it.*
@@ -350,10 +350,10 @@ paired difference in the last column removes it.*
 | QK-Norm Attention-Routing | +0.02 ± 0.01 | +0.02 ± 0.05 | 0.00 ± 0.06 |
 | Mean-Routing | +0.09 ± 0.03 | −0.02 ± 0.05 | −0.11 ± 0.06 |
 
-*Lead over Self-Routing in test accuracy (percentage points), pooled as above.*
+*Lead over Self-Routing in test accuracy (percentage points), averaged as above.*
 
 - Self-Routing gains as much from the individual loss as the mixers that hear
-  the others, so their lead over it doesn't grow. No pooled value is positive.
+  the others, so their lead over it doesn't grow. No averaged value is positive.
 - The same test on the experts' own accuracy is near 0 for every mixer.
 
 #### Experts Get Better and More Alike, and the Two Nearly Cancel
@@ -367,7 +367,7 @@ paired difference in the last column removes it.*
 | Some right, average wrong | −1.45 ± 0.15 | −1.49 ± 0.21 | −1.47 ± 0.23 | −1.48 ± 0.19 |
 | None right | +1.32 ± 0.19 | +1.31 ± 0.20 | +1.30 ± 0.21 | +1.41 ± 0.22 |
 
-*Individual $-$ joint on test (percentage points), pooled. The last four rows
+*Individual $-$ joint on test (percentage points), averaged as above. The last four rows
 sort test images by how many experts answer correctly and whether the averaged
 answer is right. Under either loss these four shares sum to 100%, apart from
 a ≈0.01% cell where no expert is right but the average is.*
@@ -417,6 +417,8 @@ $$
 
 ### Setup
 
+**The datasets: one per expert, and the target that no expert saw**
+
 | role | dataset | images | native shape |
 |---|---|---|---|
 | expert 0 | MNIST | clean handwritten digits | 1×28×28 |
@@ -452,7 +454,7 @@ direction and seed. `attention`, `rmsnorm_attention` and `mean` are the three
 
 Each trained run is one number: the median over the 5 trained epochs around
 its best joint_val epoch. Values are test accuracy in points (×100), mean ± SE
-over the 5 trial seeds. Every difference is paired by seed. "Pooled over
+over the 5 trial seeds. Every difference is paired by seed. "Averaged over
 direction" averages each seed over the forward and backward exchange, then
 takes the mean ± SE over seeds. With 5 seeds a paired difference has an SE of
 0.2 to 0.65 points per cell, so differences of about 1 point are visible and
@@ -460,7 +462,8 @@ differences under about 0.5 are not.
 
 #### The experts alone
 
-Test accuracy of the frozen models on each dataset's test set:
+**Test accuracy (%) of the frozen experts, bagging and the pooled model on
+each dataset's test set, before any channel is trained**
 
 | model | MNIST-M | MNIST | SVHN | USPS |
 |---|---|---|---|---|
@@ -482,7 +485,9 @@ Test accuracy of the frozen models on each dataset's test set:
 
 #### H2, first part: the channel raises accuracy in both settings
 
-Test accuracy on MNIST-M:
+**Ensemble test accuracy (%) on MNIST-M after the channel is trained, for
+each mixer.** Target setting: the channel trained on MNIST-M images. Source
+setting: the channel trained on MNIST, SVHN and USPS images only.
 
 | setting | loss | direction | `attention` | `rmsnorm_attention` | `self` | `mean` |
 |---|---|---|---|---|---|---|
@@ -495,6 +500,8 @@ Test accuracy on MNIST-M:
 | source | individual loss | fwd | 53.80 ± 0.80 | 54.47 ± 0.41 | 54.14 ± 0.42 | 54.48 ± 0.46 |
 | source | individual loss | bwd | 53.69 ± 0.53 | 54.71 ± 0.49 | 54.61 ± 0.43 | 54.96 ± 0.62 |
 
+**Test accuracy (%) on MNIST-M of the references**
+
 | reference | accuracy on MNIST-M |
 |---|---|
 | bagging | 40.08 ± 1.28 |
@@ -502,33 +509,6 @@ Test accuracy on MNIST-M:
 | pooled model | 55.29 ± 0.81 |
 | MoE, target setting | 53.65 ± 0.86 |
 | MoE, source setting | 48.84 ± 1.05 |
-
-Channel minus each reference, pooled over direction:
-
-| setting | loss | minus | `attention` | `rmsnorm_attention` | `self` | `mean` |
-|---|---|---|---|---|---|---|
-| target | joint loss | bagging | +35.94 ± 1.26 | +37.00 ± 1.34 | +37.97 ± 1.45 | +38.05 ± 1.29 |
-| target | joint loss | MoE, target setting | +22.38 ± 0.94 | +23.44 ± 0.96 | +24.41 ± 0.99 | +24.49 ± 0.90 |
-| target | individual loss | bagging | +38.52 ± 1.48 | +39.27 ± 1.31 | +39.98 ± 1.46 | +39.00 ± 1.45 |
-| target | individual loss | MoE, target setting | +24.96 ± 1.16 | +25.71 ± 0.91 | +26.42 ± 0.99 | +25.44 ± 0.96 |
-| source | joint loss | bagging | +12.15 ± 1.12 | +12.58 ± 1.32 | +12.89 ± 1.11 | +13.24 ± 1.26 |
-| source | joint loss | best single expert | +8.90 ± 1.31 | +9.33 ± 1.38 | +9.64 ± 1.22 | +9.99 ± 1.30 |
-| source | joint loss | MoE, source setting | +3.40 ± 0.89 | +3.83 ± 1.00 | +4.13 ± 0.92 | +4.49 ± 0.98 |
-| source | joint loss | pooled model | −3.05 ± 0.77 | −2.62 ± 0.78 | −2.32 ± 0.70 | −1.97 ± 0.74 |
-| source | individual loss | bagging | +13.66 ± 1.20 | +14.50 ± 1.19 | +14.29 ± 1.15 | +14.63 ± 1.15 |
-| source | individual loss | best single expert | +10.41 ± 1.49 | +11.25 ± 1.31 | +11.04 ± 1.38 | +11.38 ± 1.43 |
-| source | individual loss | MoE, source setting | +4.91 ± 0.88 | +5.75 ± 0.90 | +5.53 ± 0.89 | +5.88 ± 0.90 |
-| source | individual loss | pooled model | −1.54 ± 0.56 | −0.70 ± 0.73 | −0.92 ± 0.48 | −0.57 ± 0.46 |
-
-Target setting minus source setting, pooled over direction:
-
-| loss | `attention` | `rmsnorm_attention` | `self` | `mean` |
-|---|---|---|---|---|
-| joint loss | +23.79 ± 0.37 | +24.42 ± 0.30 | +25.09 ± 0.49 | +24.81 ± 0.21 |
-| individual loss | +24.86 ± 0.67 | +24.77 ± 0.25 | +25.69 ± 0.68 | +24.37 ± 0.59 |
-
-The MoE in the target setting is 4.81 ± 0.51 above the MoE in the source
-setting.
 
 - Every channel arm beats bagging and the best single expert, in both
   settings, by 9 points or more.
@@ -545,83 +525,31 @@ The first part of H2 is supported.
 
 #### H1 and H2, second part: communication does not beat the `self` mixer
 
-Lead over the `self` mixer, per cell. In brackets: the number of seeds where
-the `self` mixer is ahead.
+**Ensemble test accuracy on MNIST-M of each communicating mixer minus the
+`self` mixer (points), in the same setting, with the same loss, direction and
+seed.** Negative means the `self` mixer is more accurate.
 
-| setting | loss | direction | `attention` | `rmsnorm_attention` | `mean` |
+| setting | loss | direction | `attention` − `self` | `rmsnorm_attention` − `self` | `mean` − `self` |
 |---|---|---|---|---|---|
-| target | joint loss | fwd | −1.26 ± 0.37 [5/5] | −0.93 ± 0.36 [5/5] | +0.20 ± 0.54 [2/5] |
-| target | joint loss | bwd | −2.81 ± 0.65 [5/5] | −1.01 ± 0.28 [4/5] | −0.05 ± 0.26 [3/5] |
-| target | individual loss | fwd | −1.18 ± 0.41 [5/5] | −0.20 ± 0.51 [3/5] | −1.30 ± 0.22 [5/5] |
-| target | individual loss | bwd | −1.74 ± 0.62 [5/5] | −1.23 ± 0.36 [5/5] | −0.66 ± 0.32 [5/5] |
-| source | joint loss | fwd | −0.22 ± 0.26 [3/5] | −0.30 ± 0.41 [3/5] | +0.62 ± 0.31 [1/5] |
-| source | joint loss | bwd | −1.26 ± 0.36 [5/5] | −0.31 ± 0.55 [3/5] | +0.09 ± 0.55 [2/5] |
-| source | individual loss | fwd | −0.34 ± 0.45 [3/5] | +0.33 ± 0.52 [2/5] | +0.34 ± 0.36 [2/5] |
-| source | individual loss | bwd | −0.92 ± 0.18 [5/5] | +0.10 ± 0.33 [3/5] | +0.35 ± 0.36 [2/5] |
-
-Pooled over direction:
-
-| setting | loss | `attention` | `rmsnorm_attention` | `mean` |
-|---|---|---|---|---|
-| target | joint loss | −2.04 ± 0.36 | −0.97 ± 0.25 | +0.08 ± 0.38 |
-| target | individual loss | −1.46 ± 0.49 | −0.72 ± 0.41 | −0.98 ± 0.25 |
-| source | joint loss | −0.74 ± 0.27 | −0.30 ± 0.35 | +0.35 ± 0.24 |
-| source | individual loss | −0.63 ± 0.27 | +0.21 ± 0.30 | +0.34 ± 0.11 |
-
-Pooled over direction, loss and the three communicating mixers:
-
-| setting | lead over the `self` mixer | per seed 0 to 4 |
-|---|---|---|
-| target | −1.02 ± 0.24 | −0.94, −1.33, −1.24, −1.44, −0.13 |
-| source | −0.13 ± 0.18 | −0.07, −0.63, +0.42, −0.40, +0.05 |
+| target | joint loss | fwd | −1.26 ± 0.37 | −0.93 ± 0.36 | +0.20 ± 0.54 |
+| target | joint loss | bwd | −2.81 ± 0.65 | −1.01 ± 0.28 | −0.05 ± 0.26 |
+| target | individual loss | fwd | −1.18 ± 0.41 | −0.20 ± 0.51 | −1.30 ± 0.22 |
+| target | individual loss | bwd | −1.74 ± 0.62 | −1.23 ± 0.36 | −0.66 ± 0.32 |
+| source | joint loss | fwd | −0.22 ± 0.26 | −0.30 ± 0.41 | +0.62 ± 0.31 |
+| source | joint loss | bwd | −1.26 ± 0.36 | −0.31 ± 0.55 | +0.09 ± 0.55 |
+| source | individual loss | fwd | −0.34 ± 0.45 | +0.33 ± 0.52 | +0.34 ± 0.36 |
+| source | individual loss | bwd | −0.92 ± 0.18 | +0.10 ± 0.33 | +0.35 ± 0.36 |
 
 - Of the 24 cells, 17 have a negative lead. Nine are negative beyond 2.78 SE,
   the 95% bound for 5 seeds. None is positive beyond 2 SE.
-- The `self` mixer is ahead on all 5 seeds in 10 cells: every `attention`
-  cell in the target setting, both `attention` backward cells in the source
-  setting, and four more cells in the target setting.
 - The `mean` mixer ties the `self` mixer with the joint loss in both
   settings. With the individual loss it is 0.98 ± 0.25 below in the target
   setting.
-- The one positive pooled value beyond 2.78 SE is the `mean` mixer in the
-  source setting with the individual loss, +0.34 ± 0.11. Both of its cells
-  are within 1 SE of zero and it is one of 12 pooled tests, so it is not
-  counted as real.
-- In the first pass (3,600 expert images, 10 epochs) the `self` mixer beat
-  every communicating mixer on all 5 seeds in the source setting with the
-  joint loss and forward exchange. That does not hold here: in that cell it
-  is ahead on 3, 3 and 1 of 5 seeds.
 
 H1 is not supported, and it is reversed for the `attention` mixer. The
 second part of H2 is not supported.
 
 #### H3: the individual loss is better, but not through communication
-
-Accuracy in the source setting under each loss, pooled over direction:
-
-| mixer | joint loss | individual loss | individual loss − joint loss |
-|---|---|---|---|
-| `attention` | 52.24 ± 0.48 | 53.75 ± 0.57 | +1.51 ± 0.37 |
-| `rmsnorm_attention` | 52.67 ± 0.32 | 54.59 ± 0.35 | +1.92 ± 0.17 |
-| `self` | 52.97 ± 0.27 | 54.37 ± 0.39 | +1.40 ± 0.32 |
-| `mean` | 53.32 ± 0.19 | 54.72 ± 0.46 | +1.39 ± 0.32 |
-
-The same in the target setting:
-
-| mixer | joint loss | individual loss | individual loss − joint loss |
-|---|---|---|---|
-| `attention` | 76.02 ± 0.24 | 78.61 ± 0.37 | +2.59 ± 0.35 |
-| `rmsnorm_attention` | 77.09 ± 0.13 | 79.35 ± 0.15 | +2.27 ± 0.11 |
-| `self` | 78.06 ± 0.26 | 80.07 ± 0.29 | +2.01 ± 0.39 |
-| `mean` | 78.13 ± 0.14 | 79.09 ± 0.20 | +0.95 ± 0.22 |
-
-Change in the lead over the `self` mixer when the joint loss is replaced by
-the individual loss, pooled over direction:
-
-| setting | `attention` | `rmsnorm_attention` | `mean` |
-|---|---|---|---|
-| source | +0.11 ± 0.06 | +0.52 ± 0.42 | −0.01 ± 0.30 |
-| target | +0.57 ± 0.56 | +0.26 ± 0.43 | −1.06 ± 0.48 |
 
 - The individual loss gives a more accurate ensemble for every mixer in both
   settings, by 1.4 to 1.9 points in the source setting and 1.0 to 2.6 in the
@@ -634,9 +562,9 @@ H3 is not supported.
 
 #### Each expert after communication
 
-Each expert's own test accuracy on MNIST-M at the picked epochs
-(`test/expert_accuracy/expert{i}`), pooled over direction and the four
-mixers. In brackets: the change from step 0.
+**Each single expert's own test accuracy (%) on MNIST-M after the channel is
+trained, averaged over direction and the four mixers.** In brackets: the
+change from step 0, before the channel is trained.
 
 | setting | loss | MNIST expert | SVHN expert | USPS expert |
 |---|---|---|---|---|
@@ -646,7 +574,9 @@ mixers. In brackets: the change from step 0.
 | source | joint loss | 50.29 (+6.95 ± 1.60) | 45.76 (+11.07 ± 0.47) | 34.61 (+17.30 ± 1.42) |
 | source | individual loss | 52.17 (+8.83 ± 1.65) | 45.30 (+10.60 ± 0.52) | 37.44 (+20.12 ± 1.24) |
 
-The same under the `self` mixer alone:
+**Each single expert's own test accuracy (%) on MNIST-M under the `self`
+mixer only, where each expert hears only its own message.** In brackets: the
+change from step 0.
 
 | setting | loss | MNIST expert | SVHN expert | USPS expert |
 |---|---|---|---|---|
@@ -654,15 +584,6 @@ The same under the `self` mixer alone:
 | target | individual loss | 75.95 (+32.62 ± 1.57) | 73.71 (+39.01 ± 0.92) | 62.33 (+45.01 ± 2.50) |
 | source | joint loss | 49.10 (+5.77 ± 1.62) | 45.69 (+11.00 ± 0.96) | 35.64 (+18.33 ± 0.96) |
 | source | individual loss | 51.56 (+8.22 ± 1.67) | 45.33 (+10.63 ± 0.68) | 37.91 (+20.59 ± 1.72) |
-
-The three communicating mixers minus the `self` mixer:
-
-| setting | loss | MNIST expert | SVHN expert | USPS expert |
-|---|---|---|---|---|
-| target | joint loss | +0.11 ± 0.62 | −1.07 ± 0.31 | +5.22 ± 0.75 |
-| target | individual loss | +0.27 ± 0.37 | −0.64 ± 0.90 | +3.83 ± 1.60 |
-| source | joint loss | +1.58 ± 0.35 | +0.09 ± 0.81 | −1.37 ± 0.99 |
-| source | individual loss | +0.82 ± 0.49 | −0.04 ± 0.45 | −0.63 ± 0.78 |
 
 - The channel improves all three experts in every setting and loss. The USPS
   expert gains the most and stays the weakest.
@@ -673,7 +594,8 @@ The three communicating mixers minus the `self` mixer:
 
 #### Why the `attention` mixer loses to the `self` mixer
 
-Routing on joint_val at the picked epochs, mean over seeds:
+**How the two attention mixers route, measured on MNIST-M's joint_val split,
+mean over seeds**
 
 | setting | loss | direction | mixer | `attn_top1` | `routing_mode_share/joint` | `route_flip_rate` | `self_attn_rate` | `routed_correct/all` |
 |---|---|---|---|---|---|---|---|---|
@@ -694,6 +616,8 @@ Routing on joint_val at the picked epochs, mean over seeds:
 | source | individual loss | bwd | `attention` | 0.98 | 0.67 | 0.06 | 0.30 | 0.25 |
 | source | individual loss | bwd | `rmsnorm_attention` | 0.71 | 0.58 | 0.05 | 0.37 | 0.29 |
 
+**What each routing metric measures**
+
 | metric | what it measures |
 |---|---|
 | `attn_top1` | each receiver's largest attention weight: 1/3 is uniform, 1 is one sender |
@@ -711,8 +635,9 @@ Routing on joint_val at the picked epochs, mean over seeds:
   accuracy on MNIST-M before communication is 0.32. Receivers do not pick
   experts that are right more often than chance would.
 
-Accuracy on each split, mixer minus the `self` mixer, pooled over direction.
-`joint` is the split the channel trains on.
+**Ensemble accuracy on each split: the `self` mixer (%), and each other mixer
+minus the `self` mixer (points), averaged over direction.** `joint` is the
+split the channel trains on. joint_val and test are MNIST-M's.
 
 | setting | loss | split | `self` | `attention` − `self` | `rmsnorm_attention` − `self` | `mean` − `self` |
 |---|---|---|---|---|---|---|
@@ -734,7 +659,8 @@ Accuracy on each split, mixer minus the `self` mixer, pooled over direction.
 - In the source setting every mixer reaches 92 to 94 on the source images it
   trains on and 50 to 55 on MNIST-M.
 
-Injections and messages on joint_val, pooled over direction:
+**Size and variety of the injections and messages under each mixer, measured
+on MNIST-M's joint_val split, averaged over direction**
 
 | setting | loss | metric | `attention` | `rmsnorm_attention` | `self` | `mean` |
 |---|---|---|---|---|---|---|
@@ -750,6 +676,8 @@ Injections and messages on joint_val, pooled over direction:
 | source | individual loss | `msg_norm/injection` | 102 ± 11 | 105 ± 6 | 106 ± 13 | 98 ± 6 |
 | source | individual loss | `inj_spread` | 0.52 | 0.52 | 0.53 | 0.50 |
 | source | individual loss | `msg_rank_value` | 1.57 | 1.96 | 1.98 | 2.05 |
+
+**What each injection and message metric measures**
 
 | metric | what it measures |
 |---|---|
@@ -771,6 +699,8 @@ Injections and messages on joint_val, pooled over direction:
 correctly, and whether the ensemble's averaged answer is correct. Agreement
 is how often two experts give the same answer, averaged over pairs.
 
+**The cells of `answer_grid`**
+
 | cell | experts right | averaged answer |
 |---|---|---|
 | `all_right` | 3 | right |
@@ -778,7 +708,9 @@ is how often two experts give the same answer, averaged over pairs.
 | `some_right_avg_wrong` | 1 or 2 | wrong: an expert knew it and the vote lost it |
 | `none_right_avg_wrong` | 0 | wrong: no expert knew it |
 
-On test, pooled over direction:
+**Expert accuracy, agreement and `answer_grid` cells on the MNIST-M test set:
+step 0 and the `self` mixer (%), and each other mixer minus the `self` mixer
+(points), averaged over direction**
 
 | setting | loss | metric | step 0 | `self` | `attention` − `self` | `rmsnorm_attention` − `self` | `mean` − `self` |
 |---|---|---|---|---|---|---|---|
@@ -825,14 +757,16 @@ On test, pooled over direction:
 
 #### Did training finish
 
+**How many runs were still at their best when training stopped at epoch 30**
+
 | runs | count | best joint_val epoch is epoch 30 | 5-epoch window reaches epoch 30 | median best epoch |
 |---|---|---|---|---|
 | channel, target setting | 80 | 14 | 33 | 26 to 28 |
 | channel, source setting | 80 | 5 | 6 | 7 to 17 |
 | MoE, both settings | 10 | 1 | 3 | 14 to 19 |
 
-Test accuracy by epoch, mean over seeds and direction, joint loss /
-individual loss:
+**Ensemble test accuracy (%) on MNIST-M by training epoch, mean over seeds
+and direction.** Each cell is joint loss / individual loss.
 
 | setting | mixer | epoch 1 | epoch 5 | epoch 10 | epoch 15 | epoch 20 | epoch 25 | epoch 30 |
 |---|---|---|---|---|---|---|---|---|
@@ -849,8 +783,8 @@ individual loss:
 
 Step 0 is 40.1 in every row.
 
-Picked score minus the last epoch's test accuracy, pooled over direction and
-mixer:
+**Each run's picked score minus its test accuracy at the last epoch (points),
+averaged over direction and mixer**
 
 | setting | loss | picked − last epoch |
 |---|---|---|
@@ -943,8 +877,8 @@ mixer, the `self` mixer included.
 - n = 5. A paired difference of about 1 point is visible; differences under
   about 0.5 are not. The order of the `rmsnorm_attention`, `mean` and `self`
   mixers in the source setting is not resolved.
-- The lead tables hold 24 per-cell tests and 12 pooled tests. A single value
-  near 3 SE can be chance.
+- The lead table holds 24 per-cell tests. A single value near 3 SE can be
+  chance.
 - In the source setting the epochs a run is read at are picked on MNIST-M's
   joint_val, so the score uses target labels. It is about 0.9 points above
   the last epoch. Bagging and the pooled model have no such pick.
