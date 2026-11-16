@@ -3,7 +3,7 @@ v3 testbed: frozen experts that communicate.
 
 The pipeline, one module per stage:
 
-  data.py                   datasets as GPU tensors, split into expert / joint / joint_val / test
+  data/                     datasets, split into expert / joint / joint_val / test
   experts/architectures.py  experts as named stages; the boundaries are the read/write points
   experts/schemes.py        how a pool of experts comes to differ (seeds, class skew, NCL, ...)
   experts/pool.py           pools cached on disk, keyed by everything that made them

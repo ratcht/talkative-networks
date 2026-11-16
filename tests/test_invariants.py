@@ -23,7 +23,6 @@ from testbed.communication.channel import (
   PooledEncoder,
   build_channel,
 )
-from testbed.data import Weighted
 from testbed.experts import (
   Budget,
   ClassSkew,
@@ -46,8 +45,10 @@ def test_seed_streams_are_named_and_stable():
 
 def test_class_skew_draws_follow_each_experts_mix():
   data = fake_data(n=2000)
-  (recipe,) = ClassSkew(alpha=1.0).recipes(data, 1, seed=3)
-  draws = Weighted(recipe.sampler.weights, 200_000).epoch(generator(0))
+  scheme = ClassSkew(alpha=1.0)
+  (recipe,) = scheme.recipes(data, 1, seed=3)
+  sampler = scheme.sampler(data, recipe.profile, generator(0))
+  draws = torch.tensor([i for _ in range(100) for i in sampler])
   freq = torch.bincount(data.expert.y[draws], minlength=data.num_classes).float() / len(
     draws
   )
