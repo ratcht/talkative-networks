@@ -18,7 +18,13 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, RandomSampler, Sampler, WeightedRandomSampler
+from torch.utils.data import (
+  DataLoader,
+  RandomSampler,
+  Sampler,
+  SubsetRandomSampler,
+  WeightedRandomSampler,
+)
 
 from testbed.data import Data
 from testbed.experts.architectures import Expert, build
@@ -141,6 +147,28 @@ class ClassSkew(IndependentScheme):
     counts = torch.bincount(y, minlength=data.num_classes).float()
     weights = torch.tensor(profile["class_mix"])[y] / counts[y]
     return WeightedRandomSampler(weights, len(y), generator=gen)
+
+
+@dataclass(frozen=True)
+class PerDataset(IndependentScheme):
+  """Each expert trains on one of the expert datasets, taken in turn."""
+
+  def config(self) -> dict:
+    return {"name": "per_dataset"}
+
+  def recipes(self, data: Data, size: int, seed: int) -> list[Recipe]:
+    names = list(data.expert_sizes)
+    return [
+      Recipe(derive(seed, "expert", i), {"dataset": names[i % len(names)]})
+      for i in range(size)
+    ]
+
+  def sampler(self, data: Data, profile: dict, gen: torch.Generator) -> Sampler:
+    names = list(data.expert_sizes)
+    before = names[: names.index(profile["dataset"])]
+    start = sum(data.expert_sizes[name] for name in before)
+    stop = start + data.expert_sizes[profile["dataset"]]
+    return SubsetRandomSampler(range(start, stop), generator=gen)
 
 
 @dataclass(frozen=True)

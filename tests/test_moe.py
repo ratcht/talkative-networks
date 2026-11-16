@@ -84,6 +84,8 @@ def test_a_gate_reads_only_at_a_point():
 
 
 ARGS = ["--arm", "a", "--trial-seeds", "0"]
+ARGS += ["--expert-dataset", "fashion", "--joint-dataset", "fashion"]
+ARGS += ["--test-dataset", "fashion"]
 
 
 @pytest.mark.parametrize(

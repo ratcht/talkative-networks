@@ -37,6 +37,7 @@ class Data:
   joint_val: Split
   test: Split
   digest: str  # identifies the partition; part of every cache key
+  expert_sizes: dict[str, int]  # images of each dataset in expert, in order
   device: str = "cpu"  # where models run; the splits stay on the cpu
 
   @property
