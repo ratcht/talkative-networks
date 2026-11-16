@@ -12,7 +12,7 @@ Plan: [digits-five.md](../../docs/studies/digits-five.md).
 > nohup uv run python -m studies.multiple_datasets.run > studies/multiple_datasets/run.log 2>&1 &
 > ```
 >
-> 40 arms on trial seeds 0–4, 200 runs, one process per arm. In the morning:
+> 39 arms on trial seeds 0–4, 195 runs, one process per arm. In the morning:
 >
 > | check | command |
 > |---|---|
@@ -85,11 +85,31 @@ MNIST-M image.
 | arm | what it is |
 |---|---|
 | `experts-on-{mnist_m, mnist, svhn, usps}` | the three experts, no channel, tested on each dataset |
-| `pooled-1200` | three experts trained on all sources pooled, 1,200 images per dataset, so 3,600 per expert |
-| `pooled-3600` | the same with 3,600 per dataset, so 10,800 per expert |
+| `pooled` | one model trained on the 10,800 images the three experts were trained on |
 | `{target, source}-moe` | the soft-gated MoE: a gate weighs the frozen experts' answers |
 
 Bagging, the plain average of the frozen experts, is step 0 of every run.
+
+### Data sizes
+
+Both sizes are caps per dataset, set at the top of
+`studies/multiple_datasets/run.py`. A dataset with fewer images than the cap
+gives all it has, and each run prints how many images every dataset gave.
+
+| constant | value | what it caps | what limits it |
+|---|---|---|---|
+| `EXPERT_SAMPLES` | 3,600 | images each expert trains on | USPS has 3,646 in its expert part |
+| `JOINT_SAMPLES` | 2,000 | images each source dataset gives the channel | USPS has 2,916 in its joint part |
+
+The target setting gives the channel `JOINT_SAMPLES` × 3 MNIST-M images, so
+both settings train it on the same total, 6,000.
+
+Why these values. Each expert is its own model, so experts may differ in how
+much data they have; 3,600 happens to make them equal. The channel is one
+model trained on a mix of datasets, so an uneven mix tilts it toward the
+larger ones; 2,000 keeps the three sources at a third each. Raising
+`JOINT_SAMPLES` above 2,916 makes USPS the smallest share, and raising
+`EXPERT_SAMPLES` above 3,646 gives the USPS expert less data than the others.
 
 ## Hypotheses
 
@@ -111,8 +131,8 @@ with the same training images, loss, direction and seed.
 Not filled in yet. Accuracy points (×100), mean ± SE over the 5 trial seeds.
 
 One trial seed on the laptop before the job, for orientation only: the three
-per-dataset experts averaged 41.3 on MNIST-M, and three experts trained on
-all sources pooled (10,800 images each) averaged 54.6.
+per-dataset experts averaged 41.3 on MNIST-M, and the `pooled` model scored
+53.5.
 
 ### The experts alone
 
@@ -131,8 +151,7 @@ Accuracy on MNIST-M:
 | arm | accuracy |
 |---|---|
 | bagging, per-dataset experts | |
-| `pooled-1200` | |
-| `pooled-3600` | |
+| `pooled` | |
 
 ### H1 and H2: the channel on MNIST-M
 
@@ -207,7 +226,7 @@ which experts the channel improves:
 ## Details
 
 - Arms are built in `studies/multiple_datasets/run.py`. Arm names:
-  `experts-on-{dataset}`, `pooled-{samples}`, `{setting}-moe`,
+  `experts-on-{dataset}`, `pooled`, `{setting}-moe`,
   `{setting}-{loss}-{fwd,bwd}-{mixer}`. Run name `{arm}-trial{seed}`.
 - Tags: `study=multiple-datasets`, and on the channel arms `setting`
   (`target`, `source`), `loss`, `dir`, `mixer`.
