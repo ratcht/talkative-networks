@@ -1,0 +1,545 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{needspace}
+\usepackage[hidelinks]{hyperref}
+
+\hypersetup{pdftitle={Communicative Ensembles Meeting Notes, 2026-11-03},
+            pdfauthor={Samyar Goodarzi and Ali Al Hamadani}}
+
+% compact lists, four levels
+\setlist{itemsep=0.2ex,topsep=0.4ex,parsep=0pt}
+
+% tables
+\renewcommand{\arraystretch}{1.15}
+\newcommand{\tnote}[1]{\par\vspace{0.6ex}{\footnotesize #1}\par}
+\newcommand{\ra}{$\rightarrow$}
+\newcommand{\pmse}[3]{$#1 \pm #2$\,(#3/15)}
+\newcommand{\panel}[1]{\multicolumn{1}{l}{\textit{#1}}}
+\newcommand{\finding}[2][12]{\Needspace{#1\baselineskip}\subsubsection*{#2}}
+
+\title{Communicative Ensembles\\[0.3ex] \large Meeting Notes}
+\author{Presenters: Samyar Goodarzi \& Ali Al Hamadani}
+\date{2026-11-03}
+
+\begin{document}
+
+\maketitle
+
+% ================================================================= testbed
+\section{New Testbed}
+
+\begin{itemize}
+  \item Supports both MNIST and Fashion-MNIST.
+  \item Expert generation is completely modularised and independent of joint training.
+    \begin{itemize}
+      \item This allows us to enforce diversity through several methods, such as class skew,
+            negative correlation learning and seed variation, without affecting the training
+            of the communication channel.
+    \end{itemize}
+  \item Experts are generated per trial with a different random seed; this means our
+        architectural decisions don't fit a specific collection of experts.
+  \item The testbed supports several selection strategies for the training script to use: we can
+        select a random subset of the trial's pool, or sort on some criterion and pick the top $k$.
+  \item The communication channel has been further modularised.
+    \begin{itemize}
+      \item The mixing policy (attention, cosine attention, mean routing, self routing, etc.) can
+            be specified independently.
+    \end{itemize}
+  \item Encoder and decoder objects no longer make any spatial assumptions about their input.
+  \item We now use MLflow for experiment tracking instead of Aim; seeds are paired across arms.
+  \item Supports forwards and backwards communication configurations.
+\end{itemize}
+
+% ================================================================= baseline
+\section{Experimentation: Baseline Experiments}
+
+\subsection{Setup}
+
+\begin{itemize}
+  \item Generate a fresh pool of 3 experts for each trial seed using class skew
+        (Dirichlet $\alpha = 1$), and train:
+    \begin{itemize}
+      \item each expert on 50\% of Fashion-MNIST for 10 epochs;
+      \item then freeze the experts, and train whatever communication architecture sits between
+            them as an ensemble on a separate 40\%.
+    \end{itemize}
+  \item Every arm trains for 30 epochs at learning rate $10^{-3}$ on the ensemble's averaged
+        prediction.
+  \item We compare the performance of:
+    \begin{itemize}
+      \item \textbf{Communicative Ensemble: Linear}
+        \begin{itemize}
+          \item \emph{Encoder:} feature map at the read port \ra{} linear \ra{} $r = 8$ \ra{}
+                Q (16), K (16), V (64)
+          \item \emph{Mixer:} attention, single head, over every expert's message including its own
+          \item \emph{Decoder:} received message (64) \ra{} linear \ra{} $r = 8$ \ra{} linear to
+                the full feature map at the write port
+        \end{itemize}
+      \item \textbf{Communicative Ensemble: Non-linear.} Same as Linear, with a GELU on the
+            $r = 8$ taper of the encoder, the decoder, or both (three variants).
+      \item \textbf{Self-Routing: Linear / Non-linear}
+        \begin{itemize}
+          \item Same as the Communicative Ensemble, but each expert receives only its own message
+                (Q and K are unused).
+        \end{itemize}
+      \item \textbf{Mean-Routing: Linear / Non-linear}
+        \begin{itemize}
+          \item Same as the Communicative Ensemble, but each expert receives the plain average of
+                every expert's message, its own included (Q and K unused).
+        \end{itemize}
+      \item \textbf{Dense Soft-Gated Mixture of Experts}
+        \begin{itemize}
+          \item \emph{Gate:} each expert's feature map at the read port \ra{} linear \ra{} $r = 8$
+                \ra{} concatenate ($3 \times 8$) \ra{} GELU \ra{} linear \ra{} 3 scores \ra{}
+                softmax \ra{} weights on the experts' answer probabilities
+        \end{itemize}
+    \end{itemize}
+  \item Channels are initialised to start non-communicative, at bagging.
+  \item We use bagging as the combiner rule: the frozen experts' averaged probabilities, which
+        every arm starts from.
+  \item All experts stay frozen; only the channel or gate trains.
+  \item Each run is scored as the median test accuracy over the 5 epochs around its best
+        \texttt{joint\_val} epoch, averaged across trial seeds.
+  \item The study is split into 4 phases:
+    \begin{itemize}
+      \item \textbf{Phase 1} determines the read and write ports of both the forwards and backwards
+            communication channels, and the read port of the MoE.
+        \begin{itemize}
+          \item This is done using linear channels and their Self-Routing control at all 6 port
+                pairs, and the MoE at all 3 read ports.
+          \item Picked:
+            \begin{itemize}
+              \item Forwards: stage2 \ra{} stage3
+              \item Backwards: stage3 \ra{} stage1
+              \item MoE: reads at stage3
+            \end{itemize}
+        \end{itemize}
+      \item \textbf{Phase 2a} introduces non-linearities (GELU in the encoder, the decoder, or both)
+            into an otherwise linear forwards communication channel, and compares to Self-Routing.
+      \item \textbf{Phase 2b} introduces the same non-linearities into an otherwise linear
+            backwards communication channel, and compares to Self-Routing.
+      \item \textbf{Phase 2c} compares against Mean-Routing at all channel non-linearity levels,
+            forwards and backwards.
+      \item \textbf{Phase 3} sweeps the taper dimension $r$ of the encoders and decoders at
+            $r = 16$, 24 and 32 against the $r = 8$ baseline, using the linear and GELU channels
+            with attention, Self- and Mean-Routing, forwards and backwards.
+    \end{itemize}
+\end{itemize}
+
+% ================================================================= results
+\subsection{Results}
+
+\finding[13]{Overview}
+
+\begin{center}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+Condition & Forwards ($r = 8$) & Backwards ($r = 8$) \\
+\midrule
+No Channel               & 88.22 & 88.22 \\
+Gate                     & 89.83 & 89.83 \\
+Self-Routing             & 90.44 & 90.66 \\
+Mean-Routing             & 90.44 & 90.80 \\
+Attention-Routing        & 90.40 & 90.60 \\
+Cosine-Attention-Routing & 90.40 & -- \\
+\bottomrule
+\end{tabular}
+\tnote{Test accuracy (\%). The Gate and No Channel baselines are simply repeated across Forwards
+and Backwards, since they lack a directional configuration.}
+\end{center}
+
+\finding[20]{Linear Communicative Channel Beats MoE, but Not Through Communication}
+
+\begin{itemize}
+  \item Additionally, the introduction of non-linearities does not seem to help.
+\end{itemize}
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Architecture & Attention $-$ MoE & Self $-$ MoE & Mean $-$ MoE \\
+\midrule
+\panel{Forwards} \\
+Linear                       & \pmse{+0.57}{0.40}{13} & \pmse{+0.61}{0.38}{12} & \pmse{+0.61}{0.38}{12} \\
+Non-Linear Encoder Only      & \pmse{+0.53}{0.43}{11} & \pmse{+0.62}{0.39}{14} & \pmse{+0.57}{0.43}{13} \\
+Non-Linear Decoder Only      & \pmse{+0.53}{0.39}{12} & \pmse{+0.65}{0.41}{12} & \pmse{+0.74}{0.41}{12} \\
+Non-Linear Encoder \& Decoder & \pmse{+0.54}{0.39}{11} & \pmse{+0.64}{0.39}{13} & \pmse{+0.6}{0.43}{12} \\
+\midrule
+\panel{Backwards} \\
+Linear                       & \pmse{+0.76}{0.37}{14} & \pmse{+0.82}{0.39}{15} & \pmse{+0.97}{0.37}{15} \\
+Non-Linear Encoder Only      & \pmse{+0.76}{0.37}{14} & \pmse{+0.71}{0.39}{14} & \pmse{+0.81}{0.36}{14} \\
+Non-Linear Decoder Only      & \pmse{+0.78}{0.39}{13} & \pmse{+0.77}{0.40}{14} & \pmse{+0.89}{0.36}{14} \\
+Non-Linear Encoder \& Decoder & \pmse{+0.72}{0.37}{13} & \pmse{+0.74}{0.38}{14} & \pmse{+0.83}{0.36}{14} \\
+\bottomrule
+\end{tabular}
+\tnote{Difference in test accuracy (percentage points) $\pm$ standard error
+(number of groups exceeding the baseline / total groups).}
+\end{center}
+
+\finding[11]{Routing Is Extremely Sharp When the Sender Is Linear, and Generally Softens in the
+Backwards Configuration}
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+& \multicolumn{2}{c}{Attention Entropy}
+& \multicolumn{2}{c}{Largest Attn.\ Weight}
+& \multicolumn{2}{c}{Routing Mode Share} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(l){6-7}
+Architecture & Fwd & Bwd & Fwd & Bwd & Fwd & Bwd \\
+\midrule
+Linear                        & 0.01 & 0.35 & 1.00 & 0.85 & 85\% & 33\% \\
+Non-Linear Encoder Only       & 0.63 & 0.70 & 0.69 & 0.67 & 47\% & 29\% \\
+Non-Linear Decoder Only       & 0.00 & 0.22 & 1.00 & 0.91 & 95\% & 40\% \\
+Non-Linear Encoder \& Decoder & 0.49 & 0.55 & 0.77 & 0.75 & 56\% & 33\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\finding[11]{Linear Senders Are Louder than Non-Linear Senders Across Training}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+& \multicolumn{2}{c}{Msg Norm, Fwd} & \multicolumn{2}{c}{Msg Norm, Bwd} \\
+\cmidrule(lr){2-3}\cmidrule(l){4-5}
+Architecture & Aggregated & Injection & Aggregated & Injection \\
+\midrule
+Linear                        & 25.9 \ra{} 17.0 & 3.3 \ra{} 12.4 & 10.2 \ra{} 12.4 & 4.2 \ra{} 35.7 \\
+Non-Linear Encoder Only       & 17.6 \ra{} \phantom{0}6.1 & 3.3 \ra{} \phantom{0}8.5 & 12.9 \ra{} 13.4 & 4.1 \ra{} 30.6 \\
+Non-Linear Decoder Only       & 33.1 \ra{} 32.1 & 3.1 \ra{} \phantom{0}9.4 & \phantom{0}7.3 \ra{} \phantom{0}7.8 & 4.1 \ra{} 32.4 \\
+Non-Linear Encoder \& Decoder & 24.4 \ra{} \phantom{0}8.2 & 3.4 \ra{} \phantom{0}9.0 & 10.5 \ra{} \phantom{0}9.0 & 3.9 \ra{} 29.6 \\
+\bottomrule
+\end{tabular}
+\tnote{Epoch 1 \ra{} Epoch 30.}
+\end{center}
+
+\begin{itemize}
+  \item Non-linear components also lead to stronger query/key gradients. This is likely a result
+        of the softer routing.
+\end{itemize}
+
+\finding[21]{Phase 2c: Effects of Mean-Routing}
+
+\begin{itemize}
+  \item We find that the number of experts you listen to directly corresponds to expert
+        homogeneity, and not necessarily to better ensemble performance.
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Architecture
+& \shortstack{Avg Individual\\Expert Accuracy}
+& \shortstack{Ensemble\\Accuracy}
+& \shortstack{Ensembling\\Adds}
+& \shortstack{Agreement\\Rate}
+& \shortstack{At Least One\\Expert Right} \\
+\midrule
+No Channel & 84.32 & 88.22 & +3.90 & 81.77 & 95.20 \\
+Gate       & 84.32 & 89.83 & +5.52 & 81.77 & 95.20 \\
+\midrule
+\panel{Forward} \\
+\quad Self-Routing      & 88.20 & 90.44 & +2.24 & 88.04 & 95.41 \\
+\quad Attention-Routing & 88.57 & 90.40 & +1.83 & 89.36 & 95.07 \\
+\quad Mean-Routing      & 88.91 & 90.44 & +1.53 & 90.34 & 94.78 \\
+\midrule
+\panel{Backward} \\
+\quad Self-Routing      & 88.53 & 90.66 & +2.13 & 88.62 & 95.37 \\
+\quad Attention-Routing & 88.97 & 90.60 & +1.63 & 90.06 & 94.93 \\
+\quad Mean-Routing      & 89.26 & 90.80 & +1.55 & 90.66 & 94.88 \\
+\bottomrule
+\end{tabular}
+\tnote{All values in \%.}
+\end{center}
+
+\finding[12]{Phase 3: Does a Wider Taper Help?}
+
+\begin{itemize}
+  \item A wider Gate doesn't close the gap, relative to a wider Communicative Channel.
+\end{itemize}
+
+\begin{center}
+\footnotesize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{@{}ccccccccc@{}}
+\toprule
+& \multicolumn{2}{c}{Gate}
+& \multicolumn{2}{c}{Channel, Fwd}
+& \multicolumn{2}{c}{Channel, Bwd}
+& \multicolumn{2}{c}{Channel $-$ Gate, same $r$} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}\cmidrule(l){8-9}
+$r$ & Params & Accuracy & Params & Accuracy & Params & Accuracy & Fwd & Bwd \\
+\midrule
+8  & 13,900 & 89.83 & 55,600  & 90.43 & 93,300  & 90.64 & \pmse{+0.59}{0.39}{12} & \pmse{+0.81}{0.37}{14} \\
+16 & 27,800 & 89.89 & 111,000 & 90.40 & 186,200 & 90.72 & \pmse{+0.51}{0.36}{13} & \pmse{+0.83}{0.34}{14} \\
+24 & 41,800 & 89.86 & 166,300 & 90.44 & 279,200 & 90.72 & \pmse{+0.58}{0.40}{12} & \pmse{+0.87}{0.38}{15} \\
+32 & 55,700 & 89.88 & 221,700 & 90.38 & 372,200 & 90.78 & \pmse{+0.5}{0.38}{11}  & \pmse{+0.90}{0.35}{15} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}
+  \item Attention vs.\ Self results replicated at every width.
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+& \multicolumn{2}{c}{Attention $-$ Self, Fwd} & \multicolumn{2}{c}{Attention $-$ Self, Bwd} \\
+\cmidrule(lr){2-3}\cmidrule(l){4-5}
+Architecture & Test & Validation & Test & Validation \\
+\midrule
+$r = 8$  & $-0.11 \pm 0.04$ & $-0.11 \pm 0.03$ & $-0.01 \pm 0.05$ & $-0.02 \pm 0.04$ \\
+$r = 16$ & $-0.11 \pm 0.05$ & $-0.14 \pm 0.05$ & $+0.01 \pm 0.04$ & $+0.00 \pm 0.05$ \\
+$r = 24$ & $-0.14 \pm 0.04$ & $-0.15 \pm 0.03$ & $-0.04 \pm 0.03$ & $-0.03 \pm 0.04$ \\
+$r = 32$ & $-0.13 \pm 0.04$ & $-0.13 \pm 0.04$ & $-0.02 \pm 0.05$ & $-0.08 \pm 0.05$ \\
+\bottomrule
+\end{tabular}
+\tnote{Difference in accuracy (percentage points) $\pm$ standard error.}
+\end{center}
+
+% ================================================================= degenerate cases
+\section{Experimentation: Degenerate Cases}
+
+\subsection{Setup}
+
+\begin{itemize}
+  \item Holds the channel fixed and changes the expert group instead. The channel is the Linear
+        channel at $r = 8$, at the ports picked in Phase 1, with Self-, Mean- and
+        Attention-Routing, forwards and backwards, on the same 15 trial seeds.
+  \item Four groups:
+    \begin{itemize}
+      \item \textbf{Clones:} three copies of the trial's first expert (30 epochs).
+      \item \textbf{Two Trained + One Untrained:} the trial's pool with its third expert left at
+            random weights (60 epochs).
+      \item \textbf{Negative Correlation:} three experts trained together to disagree, at strength
+            $\lambda = 0$, 2.5 and 4, without class skew (30 epochs). The MoE is also run at each
+            $\lambda$. $\lambda = 4$ was picked after the $\lambda$ sweep had been read.
+      \item \textbf{Untrained:} three experts with random weights (150 epochs).
+    \end{itemize}
+  \item Each expert's channel starts from its own random initialisation, so clones are identical
+        only until training starts.
+  \item Same scoring as the baseline. Every result below also holds on validation images at fixed
+        epochs.
+\end{itemize}
+
+\subsection{Results}
+
+\finding[24]{Every Group Converges to the Same Kind of Expert}
+
+\begin{itemize}
+  \item Whatever the group starts as, training leaves its experts about 88\% accurate and agreeing
+        88--93\% of the time. Copies drift apart to that point; experts trained to disagree come
+        back to it within the first epoch.
+  \item Agreement beyond what accuracy alone explains (shared mistakes) also ends at the same level,
+        about where the baseline pool already starts.
+  \item The channel does most of this on its own: Self-Routing gets there too. Hearing others adds
+        a small push on top: Mean-Routing's agreement beyond accuracy is 0.6--1.3 points above
+        Self-Routing's in every group of trained experts.
+\end{itemize}
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Group
+& \shortstack{Avg Individual\\Expert Accuracy}
+& \shortstack{Agreement\\Rate}
+& \shortstack{Agreement Beyond\\Accuracy} \\
+\midrule
+Baseline pool (reference)       & 84.3 \ra{} 88.2--89.3 & \phantom{0}81.8 \ra{} 88.0--90.7 & $+10.4$ \ra{} $+10.1$ to $+11.2$ \\
+Clones                          & 82.7 \ra{} 87.5--88.5 & 100.0 \ra{} 87.8--91.1 & $+31.2$ \ra{} $+11.0$ to $+12.6$ \\
+Negative Corr., $\lambda = 0$   & 89.7 \ra{} 89.6--90.3 & \phantom{0}94.1 \ra{} 90.7--93.0 & $+13.5$ \ra{} $+10.3$ to $+11.7$ \\
+Negative Corr., $\lambda = 2.5$ & 61.5 \ra{} 88.7--89.6 & \phantom{0}32.0 \ra{} 88.9--91.2 & $\phantom{0}{-7.4}$ \ra{} $+10.0$ to $+10.8$ \\
+Negative Corr., $\lambda = 4$   & 38.7 \ra{} 87.9--89.2 & \phantom{00}6.5 \ra{} 87.5--91.1 & $-12.8$ \ra{} $+10.1$ to $+11.7$ \\
+Two Trained + One Untrained     & 59.7 \ra{} 73.7--87.6 & \phantom{0}33.8 \ra{} 58.0--87.3 & $\phantom{0}{-3.7}$ \ra{} $\phantom{0}{+2.5}$ to $+10.5$ \\
+Untrained                       & 10.2 \ra{} 72.7--84.4 & \phantom{0}18.1 \ra{} 62.3--84.1 & $\phantom{0}{+8.1}$ \ra{} $\phantom{0}{+8.1}$ to $+12.6$ \\
+\bottomrule
+\end{tabular}
+\tnote{All values in \%. Before training \ra{} range over the six trained arms (Self, Mean and
+Attention, forwards and backwards). Agreement Beyond Accuracy is the agreement rate minus what it
+would be if the experts erred independently at their average accuracy, with wrong answers spread
+evenly over the other nine classes; a rough estimate. The low ends of the last two rows are
+Self-Routing, where the untrained experts are still well behind.}
+\end{center}
+
+\finding[22]{Clones: Each Expert's Own Channel Makes the Copies Different}
+
+\begin{itemize}
+  \item Before training the copies give identical answers, so at least one is right only as often
+        as one expert. After training, at least one copy is right on 94--95\% of images, nearly as
+        many as three separately trained experts cover. Self-Routing does this too, so the
+        diversity comes from each copy's own channel, not from communication.
+  \item Mean-Routing pulls the copies back together. Mean $-$ Self, forwards / backwards:
+        individual accuracy \pmse{+0.71}{0.15}{15} / \pmse{+0.52}{0.15}{15}; agreement
+        \pmse{+2.40}{0.42}{15} / \pmse{+2.08}{0.37}{15}; at least one expert right
+        \pmse{-0.65}{0.11}{0} / \pmse{-0.76}{0.16}{0}. Ensemble accuracy doesn't move
+        (\pmse{+0.03}{0.08}{7} / \pmse{-0.06}{0.10}{5}).
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Architecture
+& \shortstack{Avg Individual\\Expert Accuracy}
+& \shortstack{Ensemble\\Accuracy}
+& \shortstack{Ensembling\\Adds}
+& \shortstack{Agreement\\Rate}
+& \shortstack{At Least One\\Expert Right} \\
+\midrule
+Before training & 82.65 & 82.65 & +0.00 & 100.00 & 82.65 \\
+\midrule
+\panel{Forward} \\
+\quad Self-Routing      & 87.53 & 89.39 & +1.86 & 87.80 & 95.03 \\
+\quad Attention-Routing & 88.08 & 89.37 & +1.29 & 89.88 & 94.36 \\
+\quad Mean-Routing      & 88.24 & 89.42 & +1.18 & 90.20 & 94.39 \\
+\midrule
+\panel{Backward} \\
+\quad Self-Routing      & 87.98 & 89.57 & +1.59 & 89.02 & 94.76 \\
+\quad Attention-Routing & 88.31 & 89.49 & +1.18 & 90.31 & 94.26 \\
+\quad Mean-Routing      & 88.49 & 89.50 & +1.01 & 91.10 & 94.00 \\
+\bottomrule
+\end{tabular}
+\tnote{All values in \%.}
+\end{center}
+
+\finding[18]{Two Trained + One Untrained: The Untrained Expert Learns What the Others Already
+Know}
+
+\begin{itemize}
+  \item Listening lifts the untrained expert's own accuracy by 6 points forwards and 19 backwards.
+        Attention-Routing does no better than Mean-Routing.
+  \item It gets there by becoming like the trained experts. Mean $-$ Self, forwards / backwards:
+        agreement \pmse{+6.3}{2.4}{15} / \pmse{+29.1}{6.5}{15}; at least one expert right
+        \pmse{-0.45}{0.19}{2} / \pmse{-0.59}{0.19}{0}. Its new right answers are on images the
+        others already get right.
+  \item So the ensemble gains far less: Mean $-$ Self is \pmse{+0.41}{0.13}{14} forwards and
+        \pmse{+0.20}{0.12}{13} backwards, and forwards it fades by epoch 60.
+\end{itemize}
+
+\begin{center}
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+& Self & Mean & Attention & Mean $-$ Self & Attention $-$ Self \\
+\midrule
+Forwards  & 79.39 & 85.52 & 86.02 & \pmse{+6.13}{2.53}{14}  & \pmse{+6.63}{1.31}{15} \\
+Backwards & 67.00 & 85.76 & 85.93 & \pmse{+18.76}{1.94}{15} & \pmse{+18.93}{2.10}{15} \\
+\bottomrule
+\end{tabular}
+\tnote{The untrained expert's own test accuracy (\%), read around its own best \texttt{joint\_val}
+epoch over 60 epochs; 10.19 before training. Agreement and coverage above are read over the first 30
+epochs, around the ensemble's best epoch.}
+\end{center}
+
+\finding[24]{Negative Correlation: The Channel Undoes the Disagreement Within One Epoch}
+
+\begin{itemize}
+  \item At $\lambda = 4$, each expert alone starts at 39\% and the three almost never agree, yet
+        their average is right 89.5\% of the time. After one epoch, every channel, Self-Routing
+        included, has turned each expert into a good one on its own, and agreement is already
+        81--88\% on validation.
+  \item Backwards, Mean-Routing gains on Self-Routing as the experts disagree more: Mean $-$ Self,
+        minus the same gap at $\lambda = 0$, is \pmse{+0.15}{0.15}{9} at $\lambda = 2.5$ and
+        \pmse{+0.29}{0.16}{12} at $\lambda = 4$ (on validation $+0.19$ and $+0.28$, 15/15). This
+        is Self-Routing losing more as $\lambda$ rises, not Mean-Routing gaining. Forwards there is
+        no clear gain.
+  \item The MoE leaves the experts as they are, and every channel arm beats it at every $\lambda$,
+        by 0.33--0.83 points (12--15/15).
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Architecture
+& \shortstack{Avg Individual\\Expert Accuracy}
+& \shortstack{Agreement\\Rate}
+& \shortstack{Ensemble\\Accuracy} \\
+\midrule
+Before training & 38.73 & \phantom{0}6.53 & 89.50 \\
+MoE             & 38.73 & \phantom{0}6.53 & 89.83 \\
+\midrule
+\panel{Forward} \\
+\quad Self-Routing      & 88.25 & 88.45 & 90.29 \\
+\quad Attention-Routing & 88.52 & 89.66 & 90.17 \\
+\quad Mean-Routing      & 88.95 & 90.91 & 90.33 \\
+\midrule
+\panel{Backward} \\
+\quad Self-Routing      & 87.92 & 87.54 & 90.25 \\
+\quad Attention-Routing & 88.44 & 89.02 & 90.25 \\
+\quad Mean-Routing      & 89.21 & 91.10 & 90.51 \\
+\bottomrule
+\end{tabular}
+\tnote{$\lambda = 4$, all values in \%. At least one expert right is left out: it can't be compared
+across $\lambda$, since experts that spread their guesses cover more classes by chance.}
+\end{center}
+
+\finding[24]{Untrained: Attention Helps, Forwards by Making Experts Alike, Backwards by Widening
+Coverage}
+
+\begin{itemize}
+  \item With nothing to learn from each other, the channel alone still reaches 87\% forwards and
+        83\% backwards from random features (Self-Routing, 150 epochs).
+  \item By 150 epochs, Attention $-$ Self is \pmse{+0.88}{0.16}{15} forwards and
+        \pmse{+1.44}{0.80}{14} backwards; within noise at 30 epochs. Backwards is still climbing,
+        so these are lower bounds.
+  \item Forwards, attention makes the experts better and more alike (agreement
+        \pmse{+12.1}{3.4}{14}, at least one expert right \pmse{-1.57}{0.33}{0}). Backwards, it
+        widens what they cover (\pmse{+0.76}{0.30}{13}): the only arm in the study where hearing
+        others raises coverage.
+  \item Mean-Routing is uneven: by 150 epochs it is ahead of Self on most trials, but 6--13 points
+        behind on 3 of 15 backwards.
+  \item Unlike forwards elsewhere, routing here varies with the image: the most common routing
+        covers 35\% of images forwards and 28\% backwards.
+\end{itemize}
+
+\begin{center}
+\small
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Architecture
+& \shortstack{Avg Individual\\Expert Accuracy}
+& \shortstack{Ensemble\\Accuracy}
+& \shortstack{Ensembling\\Adds}
+& \shortstack{Agreement\\Rate}
+& \shortstack{At Least One\\Expert Right} \\
+\midrule
+Before training & 10.21 & \phantom{0}9.65 & $-0.55$ & 18.14 & 25.82 \\
+\midrule
+\panel{Forward} \\
+\quad Self-Routing      & 79.44 & 86.97 & \phantom{0}+7.53 & 72.05 & 95.06 \\
+\quad Attention-Routing & 84.38 & 87.86 & \phantom{0}+3.48 & 84.13 & 93.49 \\
+\quad Mean-Routing      & 81.04 & 87.12 & \phantom{0}+6.07 & 78.31 & 93.08 \\
+\midrule
+\panel{Backward} \\
+\quad Self-Routing      & 72.67 & 82.85 & +10.18 & 62.31 & 93.47 \\
+\quad Attention-Routing & 74.49 & 84.29 & \phantom{0}+9.79 & 64.34 & 94.23 \\
+\quad Mean-Routing      & 75.01 & 82.37 & \phantom{0}+7.36 & 69.67 & 92.23 \\
+\bottomrule
+\end{tabular}
+\tnote{150 epochs, all values in \%. Differences above are $\pm$ twice the standard error (number of
+trials ahead / 15).}
+\end{center}
+
+\end{document}
