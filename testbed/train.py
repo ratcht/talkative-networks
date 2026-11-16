@@ -24,9 +24,10 @@ from functools import partial
 
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
 from testbed.communication.ensemble import CommunicatingEnsemble, Output, average
-from testbed.data import Data, Shuffle
+from testbed.data import Data, Split
 from testbed.moe import GatedEnsemble
 from testbed.metrics import (
   ExchangeMeter,
@@ -80,8 +81,8 @@ def train(
   step 0 first."""
   # the experts are frozen, so their answers without communication are fixed
   pre = {
-    split: predict(model.bagging, getattr(data, split).x)[0]
-    for split in ("joint", "joint_val", "test")
+    split: predict(model.bagging, getattr(data, split), data.device)[0]
+    for split in ("joint_val", "test")
   }
   routes: dict[str, torch.Tensor | None] = {}  # for route_flip_rate
   history = []
@@ -97,23 +98,26 @@ def train(
 
   optimizer = torch.optim.Adam(params, lr=config.lr)
   optimisation = OptimisationMeter(model.trainable)
-  gen = generator(derive(seed, "batches"), data.device)
+  gen = generator(derive(seed, "batches"))
+  loader = DataLoader(data.joint, config.batch_size, shuffle=True, generator=gen)
   for _ in range(config.epochs):
     model.train()
-    order = Shuffle(len(data.joint)).epoch(gen)
-    logits, weights = [], []
-    for idx in order.split(config.batch_size):
-      out = model(data.joint.x[idx])
-      loss = loss_fn(out.logits, data.joint.y[idx], config.loss, out.weights)
+    pres, logits, weights, ys = [], [], [], []
+    for x, y in loader:
+      x, y = x.to(data.device), y.to(data.device)
+      out = model(x)
+      loss = loss_fn(out.logits, y, config.loss, out.weights)
       optimizer.zero_grad(set_to_none=True)
       loss.backward()
       optimisation.before_step()
       optimizer.step()
       optimisation.after_step()
+      pres.append(model.bagging(x).logits)
       logits.append(out.logits.detach())
+      ys.append(y)
       if out.weights is not None:
         weights.append(out.weights.detach())
-    post, y = torch.cat(logits), data.joint.y[order]
+    post, y = torch.cat(logits), torch.cat(ys)
     w = torch.cat(weights) if weights else None
     joint_metrics = prefix(
       "joint",
@@ -123,7 +127,7 @@ def train(
       }
       | prefix("answer_grid", answer_grid(post, y, w))
       | prefix(
-        "joint_answer_shift", joint_answer_shift(pre["joint"][order], post, y, w)
+        "joint_answer_shift", joint_answer_shift(torch.cat(pres), post, y, w)
       ),
     )
     log(
@@ -146,10 +150,10 @@ def evaluate(
   model.eval()
   out = {}
   for split in ("joint_val", "test"):
-    x, y = getattr(data, split).x, getattr(data, split).y
+    y = getattr(data, split).y.to(data.device)
     measure = split == "joint_val"
     run = partial(model, answer_each_round=True) if measure else model
-    post, weights, meters = predict(run, x, measure)
+    post, weights, meters = predict(run, getattr(data, split), data.device, measure)
     metrics = {
       "loss": loss_fn(post, y, loss, weights).item(),
       "accuracy": accuracy(post, y, weights),
@@ -175,16 +179,17 @@ def evaluate(
 @torch.no_grad()
 def predict(
   run: Callable[[torch.Tensor], Output],
-  x: torch.Tensor,
+  split: Split,
+  device: str,
   measure: bool = False,
   batch_size: int = 2000,
 ) -> tuple[torch.Tensor, torch.Tensor | None, dict[str, ExchangeMeter]]:
-  """Logits (N, M, classes) on x, the ensemble's weights on its experts (N, M)
-  if it has any, and with `measure` a meter per exchange site that has read
-  every batch's trace."""
+  """Logits (N, M, classes) on the split, the ensemble's weights on its experts
+  (N, M) if it has any, and with `measure` a meter per exchange site that has
+  read every batch's trace."""
   logits, weights, meters = [], [], {}
-  for batch in x.split(batch_size):
-    out = run(batch)
+  for x, _ in DataLoader(split, batch_size):
+    out = run(x.to(device))
     logits.append(out.logits)
     if out.weights is not None:
       weights.append(out.weights)

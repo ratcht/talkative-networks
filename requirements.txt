@@ -23,6 +23,7 @@ cuda-bindings==13.2.0
 cuda-pathfinder==1.5.3
 cuda-toolkit==13.0.2
 cycler==0.12.1
+datasets==5.2.0
 debugpy==1.8.20
 decorator==5.3.0
 einops==0.8.2

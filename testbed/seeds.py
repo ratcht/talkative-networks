@@ -33,8 +33,8 @@ def derive(seed: int, *path: str | int) -> int:
   return int(word) >> 1  # 63 bits: valid for torch, numpy and random alike
 
 
-def generator(seed: int, device: torch.device | str = "cpu") -> torch.Generator:
-  return torch.Generator(device=device).manual_seed(seed)
+def generator(seed: int) -> torch.Generator:
+  return torch.Generator().manual_seed(seed)
 
 
 @contextmanager
