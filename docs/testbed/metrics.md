@@ -187,6 +187,8 @@ on its own while the ensemble's answer gets better, because what is trained
 is the average. `--loss per_expert` does optimise it. Measured on joint_val
 and test.
 
+`expert_accuracy/expert{i}` is the same share for expert $i$ alone.
+
 The intent of this measurement is to show whether communication improved the
 experts themselves or only their combined answer.
 

@@ -16,7 +16,14 @@ def fake_data(n: int = 200, classes: int = 10) -> Data:
     )
 
   return Data(
-    "fake", classes, split(n), split(n), split(n // 2), split(n // 2), digest="fake"
+    "fake",
+    classes,
+    split(n),
+    split(n),
+    split(n // 2),
+    split(n // 2),
+    digest="fake",
+    expert_sizes={"fake": n},
   )
 
 

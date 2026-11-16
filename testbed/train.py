@@ -33,6 +33,7 @@ from testbed.metrics import (
   ExchangeMeter,
   OptimisationMeter,
   accuracy,
+  accuracy_per_expert,
   answer_grid,
   answer_shift_kl,
   expert_accuracy,
@@ -82,7 +83,7 @@ def train(
   # the experts are frozen, so their answers without communication are fixed
   pre = {
     split: predict(model.bagging, getattr(data, split), data.device)[0]
-    for split in ("joint_val", "test")
+    for split in ("joint", "joint_val", "test")
   }
   routes: dict[str, torch.Tensor | None] = {}  # for route_flip_rate
   history = []
@@ -99,10 +100,13 @@ def train(
   optimizer = torch.optim.Adam(params, lr=config.lr)
   optimisation = OptimisationMeter(model.trainable)
   gen = generator(derive(seed, "batches"))
-  loader = DataLoader(data.joint, config.batch_size, shuffle=True, generator=gen)
   for _ in range(config.epochs):
     model.train()
-    pres, logits, weights, ys = [], [], [], []
+    order = torch.randperm(len(data.joint), generator=gen)
+    loader = DataLoader(
+      data.joint, config.batch_size, sampler=order.tolist(), generator=gen
+    )
+    logits, weights = [], []
     for x, y in loader:
       x, y = x.to(data.device), y.to(data.device)
       out = model(x)
@@ -112,12 +116,10 @@ def train(
       optimisation.before_step()
       optimizer.step()
       optimisation.after_step()
-      pres.append(model.bagging(x).logits)
       logits.append(out.logits.detach())
-      ys.append(y)
       if out.weights is not None:
         weights.append(out.weights.detach())
-    post, y = torch.cat(logits), torch.cat(ys)
+    post, y = torch.cat(logits), data.joint.y[order].to(data.device)
     w = torch.cat(weights) if weights else None
     joint_metrics = prefix(
       "joint",
@@ -127,7 +129,7 @@ def train(
       }
       | prefix("answer_grid", answer_grid(post, y, w))
       | prefix(
-        "joint_answer_shift", joint_answer_shift(torch.cat(pres), post, y, w)
+        "joint_answer_shift", joint_answer_shift(pre["joint"][order], post, y, w)
       ),
     )
     log(
@@ -159,6 +161,7 @@ def evaluate(
       "accuracy": accuracy(post, y, weights),
       "expert_accuracy": expert_accuracy(post, y),
     }
+    metrics |= prefix("expert_accuracy", accuracy_per_expert(post, y))
     metrics |= prefix("answer_grid", answer_grid(post, y, weights))
     metrics |= prefix(
       "joint_answer_shift", joint_answer_shift(pre[split], post, y, weights)

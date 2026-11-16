@@ -8,7 +8,7 @@ run in seconds with no downloads, GPU or MLflow.
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 import torch
@@ -26,6 +26,7 @@ from testbed.communication.channel import (
 from testbed.experts import (
   Budget,
   ClassSkew,
+  PerDataset,
   NegativeCorrelation,
   Redundant,
   SeedOnly,
@@ -41,6 +42,15 @@ def test_seed_streams_are_named_and_stable():
   assert derive(0, "pool") != derive(0, "group")
   assert derive(0, "a", "b") != derive(0, "b", "a")
   assert derive(1, "expert", 0) != derive(0, "expert", 1)  # no `seed + i` collisions
+
+
+def test_per_dataset_experts_draw_only_from_their_dataset():
+  data = replace(fake_data(n=2000), expert_sizes={"a": 500, "b": 1500})
+  scheme = PerDataset()
+  recipes = scheme.recipes(data, 3, seed=0)
+  assert [r.profile["dataset"] for r in recipes] == ["a", "b", "a"]
+  draws = sorted(scheme.sampler(data, recipes[1].profile, generator(0)))
+  assert draws == list(range(500, 2000))
 
 
 def test_class_skew_draws_follow_each_experts_mix():
@@ -139,6 +149,8 @@ def test_channel_size_matches_the_docs():
 
 
 ARGS = ["--arm", "a", "--trial-seeds", "0"]
+ARGS += ["--expert-dataset", "fashion", "--joint-dataset", "fashion"]
+ARGS += ["--test-dataset", "fashion"]
 
 
 def test_the_command_line_takes_tags_and_full_flag_names_only():

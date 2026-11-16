@@ -27,6 +27,8 @@ import argparse
 from dataclasses import asdict
 from statistics import mean
 
+import torch
+
 from testbed.communication import (
   DECODERS,
   ENCODERS,
@@ -44,6 +46,7 @@ from testbed.experts import (
   ClassSkew,
   IndependentScheme,
   NegativeCorrelation,
+  PerDataset,
   Redundant,
   Scheme,
   SeedOnly,
@@ -59,6 +62,7 @@ SCHEMES = {
   "seed_only": lambda args: SeedOnly(),
   "class_skew": lambda args: ClassSkew(args.alpha),
   "negative_correlation": lambda args: NegativeCorrelation(args.lam),
+  "per_dataset": lambda args: PerDataset(),
 }
 
 
@@ -108,7 +112,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   p.add_argument("--trial-seeds", type=int, nargs="+", required=True)
 
   data = p.add_argument_group("data")
-  data.add_argument("--dataset", choices=DATASETS, default="fashion")
+  data.add_argument("--expert-dataset", choices=DATASETS, nargs="+", required=True)
+  data.add_argument("--joint-dataset", choices=DATASETS, nargs="+", required=True)
+  data.add_argument("--test-dataset", choices=DATASETS, nargs="+", required=True)
+  data.add_argument(
+    "--expert-samples", type=int, help="at most this many images per expert dataset"
+  )
+  data.add_argument(
+    "--joint-samples", type=int, help="at most this many images per joint dataset"
+  )
   data.add_argument("--split-seed", type=int, default=0, help="pinned while iterating")
   data.add_argument("--device", default="cuda")
 
@@ -196,6 +208,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
   args = parse_args(argv)
+  torch.backends.cudnn.deterministic = True  # same seeds, same experts on gpu
   check_flags(args)  # before loading anything, so bad flags fail fast
   tags = extra_tags(args)
   exchanges = [Exchange(read, write) for read, write in args.exchange]
@@ -212,7 +225,15 @@ def main(argv: list[str] | None = None) -> None:
     value_dim=args.value_dim,
     width=args.width,
   )
-  data = load(args.dataset, split_seed=args.split_seed, device=args.device)
+  data = load(
+    args.expert_dataset,
+    args.joint_dataset,
+    args.test_dataset,
+    args.expert_samples,
+    args.joint_samples,
+    split_seed=args.split_seed,
+    device=args.device,
+  )
   scheme = make_scheme(args)
   budget = Budget(epochs=args.expert_epochs)
   pool_size = args.pool_size or args.experts
@@ -258,7 +279,11 @@ def main(argv: list[str] | None = None) -> None:
       tracker.log_params(
         {
           "data": {
-            "name": data.name,
+            "expert": args.expert_dataset,
+            "joint": args.joint_dataset,
+            "test": args.test_dataset,
+            "expert_samples": args.expert_samples,
+            "joint_samples": args.joint_samples,
             "split_seed": args.split_seed,
             "digest": data.digest,
           },
