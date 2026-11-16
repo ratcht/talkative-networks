@@ -62,14 +62,14 @@ same number of images, epochs and steps. The experts are then frozen.
 
 | axis | values |
 |---|---|
-| channel's training images | target: 6,000 from MNIST-M; source: 2,000 each from MNIST, SVHN and USPS |
+| channel's training images | target: 8,700 from MNIST-M; source: 2,900 each from MNIST, SVHN and USPS |
 | loss | joint (`--loss ensemble`), individual (`--loss per_expert`) |
 | direction | forward (`stage1 → stage2`), backward (`stage2 → stage1`, one round) |
 | mixer | `attention`, `rmsnorm_attention`, `self`, `mean` |
 | trial seeds | 0–4, so n = 5 per arm |
 
 The encoder and decoder are `linear_taper_gelu` in every arm. In both
-settings the channel trains on 6,000 images, joint_val is MNIST-M's, and the
+settings the channel trains on 8,700 images, joint_val is MNIST-M's, and the
 test set is MNIST-M's. In the source setting the channel never trains on an
 MNIST-M image.
 
@@ -99,15 +99,16 @@ gives all it has, and each run prints how many images every dataset gave.
 | constant | value | what it caps | what limits it |
 |---|---|---|---|
 | `EXPERT_SAMPLES` | 3,600 | images each expert trains on | USPS has 3,646 in its expert part |
-| `JOINT_SAMPLES` | 2,000 | images each source dataset gives the channel | USPS has 2,916 in its joint part |
+| `JOINT_SAMPLES` | 2,900 | images each source dataset gives the channel | USPS has 2,916 in its joint part |
 
 The target setting gives the channel `JOINT_SAMPLES` × 3 MNIST-M images, so
-both settings train it on the same total, 6,000.
+both settings train it on the same total, 8,700. `EPOCHS`, also there, is the
+number of joint epochs, 30.
 
 Why these values. Each expert is its own model, so experts may differ in how
 much data they have; 3,600 happens to make them equal. The channel is one
 model trained on a mix of datasets, so an uneven mix tilts it toward the
-larger ones; 2,000 keeps the three sources at a third each. Raising
+larger ones; 2,900 is the most that keeps the three sources at a third each. Raising
 `JOINT_SAMPLES` above 2,916 makes USPS the smallest share, and raising
 `EXPERT_SAMPLES` above 3,646 gives the USPS expert less data than the others.
 
@@ -214,7 +215,10 @@ which experts the channel improves:
 - Without Synthetic Digits, SVHN is the only expert trained on colour images.
 - USPS is upscaled from 16×16, and 3,600 images is a tenth of SVHN's expert
   part.
-- 10 joint epochs and n = 5.
+- n = 5.
+- A first pass at 10 joint epochs and 2,000 images per source dataset was
+  stopped: `self` was still improving at its last epoch. Those runs are in
+  MLflow with `joint.epochs` = 10.
 
 ## Next
 
@@ -235,7 +239,7 @@ which experts the channel improves:
   `expert{i}.dataset` is expert *i*'s dataset.
 - The `experts-on-*` arms train the same experts four times. Identical
   `pool.digest` across them confirms the weights are the same.
-- Fixed: `cnn3` experts, M = 3, 10 expert epochs, 10 joint epochs, batch 128,
+- Fixed: `cnn3` experts, M = 3, 10 expert epochs, 30 joint epochs, batch 128,
   split seed 0, the testbed's default channel sizes.
 - Run score (`testbed/results.py`): the median over the 5 trained epochs
   around the best joint_val epoch.

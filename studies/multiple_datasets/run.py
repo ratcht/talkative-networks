@@ -10,15 +10,16 @@ import sys
 
 from studies.multiple_datasets import EXPERTS, STUDY, TARGET
 
-SOURCES = " ".join(EXPERTS)
-COMMON = f"--trial-seeds 0 1 2 3 4 --tag study={STUDY} --expert-dataset {SOURCES}"
-
 # caps: a dataset with fewer images than its cap gives all it has
 EXPERT_SAMPLES = 3600  # per expert dataset
-JOINT_SAMPLES = (
-  2000  # per source dataset; the target gives as many as the sources together
-)
+JOINT_SAMPLES = 2900  # per source dataset; the target gives three times this
+EPOCHS = 30  # of joint training
 
+SOURCES = " ".join(EXPERTS)
+COMMON = (
+  f"--trial-seeds 0 1 2 3 4 --tag study={STUDY} --expert-dataset {SOURCES}"
+  f" --epochs {EPOCHS}"
+)
 PER_DATASET = f"--scheme per_dataset --expert-samples {EXPERT_SAMPLES} --experts 3"
 CHANNEL = "--encoder linear_taper_gelu --decoder linear_taper_gelu"
 
