@@ -14,11 +14,12 @@ from studies.multiple_datasets import EXPERTS, STUDY, TARGET
 EXPERT_SAMPLES = 3600  # per expert dataset
 JOINT_SAMPLES = 2900  # per source dataset; the target gives three times this
 EPOCHS = 30  # of joint training
+PASS = 2  # tagged on every run; bump it when rerunning with other settings
 
 SOURCES = " ".join(EXPERTS)
 COMMON = (
   f"--trial-seeds 0 1 2 3 4 --tag study={STUDY} --expert-dataset {SOURCES}"
-  f" --epochs {EPOCHS}"
+  f" --epochs {EPOCHS} --tag pass={PASS}"
 )
 PER_DATASET = f"--scheme per_dataset --expert-samples {EXPERT_SAMPLES} --experts 3"
 CHANNEL = "--encoder linear_taper_gelu --decoder linear_taper_gelu"

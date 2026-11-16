@@ -18,7 +18,7 @@ Plan: [digits-five.md](../../docs/studies/digits-five.md).
 > |---|---|
 > | arms that crashed | `grep FAILED studies/multiple_datasets/run.log` |
 > | one summary line per arm | `grep "mean over" studies/multiple_datasets/run.log` |
-> | everything else | MLflow, tag `study=multiple-datasets` |
+> | everything else | MLflow, tags `study=multiple-datasets` and `pass=2` |
 >
 > Not in this job: the feature-combiner baseline (not built; the soft-gated
 > MoE stands in), Synthetic Digits, and masking the home expert.
@@ -218,7 +218,7 @@ which experts the channel improves:
 - n = 5.
 - A first pass at 10 joint epochs and 2,000 images per source dataset was
   stopped: `self` was still improving at its last epoch. Those runs are in
-  MLflow with `joint.epochs` = 10.
+  MLflow without a `pass` tag; this pass is tagged `pass=2`.
 
 ## Next
 
@@ -232,7 +232,7 @@ which experts the channel improves:
 - Arms are built in `studies/multiple_datasets/run.py`. Arm names:
   `experts-on-{dataset}`, `pooled`, `{setting}-moe`,
   `{setting}-{loss}-{fwd,bwd}-{mixer}`. Run name `{arm}-trial{seed}`.
-- Tags: `study=multiple-datasets`, and on the channel arms `setting`
+- Tags: `study=multiple-datasets`, `pass=2`, and on the channel arms `setting`
   (`target`, `source`), `loss`, `dir`, `mixer`.
 - Params: `data.expert`, `data.joint` and `data.test` are the datasets of each
   stage; `data.expert_samples` and `data.joint_samples` are the caps;
