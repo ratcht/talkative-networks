@@ -12,13 +12,19 @@ from studies.multiple_datasets import EXPERTS, STUDY, TARGET
 
 SOURCES = " ".join(EXPERTS)
 COMMON = f"--trial-seeds 0 1 2 3 4 --tag study={STUDY} --expert-dataset {SOURCES}"
-PER_DATASET = "--scheme per_dataset --expert-samples 3600 --experts 3"
+
+# caps: a dataset with fewer images than its cap gives all it has
+EXPERT_SAMPLES = 3600  # per expert dataset
+JOINT_SAMPLES = (
+  2000  # per source dataset; the target gives as many as the sources together
+)
+
+PER_DATASET = f"--scheme per_dataset --expert-samples {EXPERT_SAMPLES} --experts 3"
 CHANNEL = "--encoder linear_taper_gelu --decoder linear_taper_gelu"
 
-# the channel trains on 6000 images, from the target or split evenly over the sources
 JOINT = {
-  "target": f"--joint-dataset {TARGET} --joint-samples 6000",
-  "source": f"--joint-dataset {SOURCES} --joint-samples 2000",
+  "target": f"--joint-dataset {TARGET} --joint-samples {JOINT_SAMPLES * len(EXPERTS)}",
+  "source": f"--joint-dataset {SOURCES} --joint-samples {JOINT_SAMPLES}",
 }
 EXCHANGE = {"fwd": "stage1 stage2", "bwd": "stage2 stage1"}
 LOSSES = ("ensemble", "per_expert")
@@ -34,12 +40,11 @@ def arms() -> list[str]:
       f"--arm experts-on-{test} {PER_DATASET} --joint-dataset {TARGET} --test-dataset {test}"
     )
 
-  # experts trained on all sources pooled: same images per expert, then same in total
-  for samples in (1200, 3600):
-    arms.append(
-      f"--arm pooled-{samples} --scheme seed_only --expert-samples {samples} --experts 3"
-      f" --joint-dataset {TARGET} --test-dataset {TARGET}"
-    )
+  # one model trained on everything the three experts were trained on
+  arms.append(
+    f"--arm pooled --scheme seed_only --expert-samples {EXPERT_SAMPLES} --experts 1"
+    f" --joint-dataset {TARGET} --test-dataset {TARGET}"
+  )
 
   for setting, joint in JOINT.items():
     data = f"{PER_DATASET} {joint} --test-dataset {TARGET} --tag setting={setting}"
