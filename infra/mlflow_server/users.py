@@ -51,7 +51,10 @@ def main() -> None:
     print(f"  [mlflow]\n  mlflow_tracking_username = {args.username}")
     print("  mlflow_tracking_password = THEIR PASSWORD")
   else:
-    client.update_user_password(args.username, password)
+    # Changing your own password also needs the current one; an admin changing
+    # someone else's doesn't.
+    current = os.environ["MLFLOW_TRACKING_PASSWORD"] if login == args.username else None
+    client.update_user_password(args.username, password, current_password=current)
     print(f"Changed the password for {args.username}; it applies within 5 minutes.")
 
 
