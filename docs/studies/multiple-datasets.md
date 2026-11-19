@@ -566,8 +566,9 @@ flowchart LR
   points. The channel, which changes the experts' features, gains 12 to 40.
 - The `attention` mixer's routing is fixed, ignores the image, and picks a
   correct expert no more often than chance. It behaves like the `self` mixer
-  with the wires crossed, and it fits the channel's own training images 3 to
-  4 points worse.
+  with the wires crossed, and it fits the channel's own training images
+  worse: by 3 to 4 points in the target setting and about 1 in the source
+  setting.
 - The `mean` mixer does transfer something: the USPS expert is 10 points
   better with it than under the `self` mixer in the target setting. But the
   ensemble already averages the experts' answers, so an image one expert
