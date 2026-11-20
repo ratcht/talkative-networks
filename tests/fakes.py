@@ -15,8 +15,16 @@ def fake_data(n: int = 200, classes: int = 10) -> Data:
       torch.randint(0, classes, (k,), generator=gen),
     )
 
+  expert = split(n)
   return Data(
-    "fake", classes, split(n), split(n), split(n // 2), split(n // 2), digest="fake"
+    "fake",
+    classes,
+    expert,
+    split(n),
+    split(n // 2),
+    split(n // 2),
+    digest="fake",
+    expert_parts={"fake": expert},
   )
 
 
