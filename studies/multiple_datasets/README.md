@@ -85,8 +85,16 @@ MNIST-M image.
 | arm | what it is |
 |---|---|
 | `experts-on-{mnist_m, mnist, svhn, usps}` | the three experts, no channel, tested on each dataset |
-| `pooled` | one model trained on the 10,800 images the three experts were trained on |
-| `{target, source}-moe` | the soft-gated MoE: a gate weighs the frozen experts' answers |
+| `pooled-{arch}-experts-data-{epochs}ep` | one model trained on the 10,800 images the three experts were trained on |
+| `pooled-{arch}-{target, source}-data-{epochs}ep` | one model trained on those and the 8,700 images that setting's channel is trained on |
+| `{target, source}-moe-{read}-w{width}` | the soft-gated MoE: a gate weighs the frozen experts' answers |
+
+The pooled model is a `cnn3`, the size of one expert, or a `cnn3_large`,
+`cnn3` at twice the width and about the size of the three experts and their
+channel. It trains for 10 or 30 epochs. The gate reads at `stage1`, `stage2`
+or `stage3` with width 8 or 32, and the largest has more trained weights than
+the channel. Of each, the one to report is the best on joint_val. Every run
+logs `weights.experts` and `weights.trained`.
 
 Bagging, the plain average of the frozen experts, is step 0 of every run.
 
@@ -230,9 +238,10 @@ which experts the channel improves:
 ## Details
 
 - Arms are built in `studies/multiple_datasets/run.py`. Arm names:
-  `experts-on-{dataset}`, `pooled`, `{setting}-moe`,
+  `experts-on-{dataset}`, `pooled-{arch}-{trained_on}-{epochs}ep`,
+  `{setting}-moe-{read}-w{width}`,
   `{setting}-{loss}-{fwd,bwd}-{mixer}`. Run name `{arm}-trial{seed}`.
-- Tags: `study=multiple-datasets`, `pass=2`, and on the channel arms `setting`
+- Tags: `study=multiple-datasets`, `pass=3`, and on the channel arms `setting`
   (`target`, `source`), `loss`, `dir`, `mixer`.
 - Params: `data.expert`, `data.joint` and `data.test` are the datasets of each
   stage; `data.expert_samples` and `data.joint_samples` are the caps;
