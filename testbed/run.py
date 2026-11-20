@@ -44,6 +44,7 @@ from testbed.experts import (
   ARCHITECTURES,
   Budget,
   ClassSkew,
+  ExpertAndJoint,
   IndependentScheme,
   NegativeCorrelation,
   PerDataset,
@@ -60,6 +61,7 @@ from testbed.train import JointConfig, train
 
 SCHEMES = {
   "seed_only": lambda args: SeedOnly(),
+  "expert_and_joint": lambda args: ExpertAndJoint(),
   "class_skew": lambda args: ClassSkew(args.alpha),
   "negative_correlation": lambda args: NegativeCorrelation(args.lam),
   "per_dataset": lambda args: PerDataset(),
@@ -91,6 +93,10 @@ def check_flags(args: argparse.Namespace) -> None:
     raise SystemExit("--gate-read needs a --gate")
 
 
+def count_weights(module: torch.nn.Module) -> int:
+  return sum(p.numel() for p in module.parameters())
+
+
 def extra_tags(args: argparse.Namespace) -> dict[str, str]:
   """The --tag KEY=VALUE flags as a dict."""
   tags = {}
@@ -114,7 +120,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   data = p.add_argument_group("data")
   data.add_argument("--expert-dataset", choices=DATASETS, nargs="+", required=True)
   data.add_argument("--joint-dataset", choices=DATASETS, nargs="+", required=True)
-  data.add_argument("--test-dataset", choices=DATASETS, nargs="+", required=True)
+  data.add_argument(
+    "--test-dataset",
+    choices=DATASETS,
+    nargs="+",
+    required=True,
+    help="joint_val is taken from these too",
+  )
   data.add_argument(
     "--expert-samples", type=int, help="at most this many images per expert dataset"
   )
@@ -298,6 +310,10 @@ def main(argv: list[str] | None = None) -> None:
             "digest": pool.digest,
             "size": pool_size,
             "group": group,
+          },
+          "weights": {
+            "experts": count_weights(model.experts),
+            "trained": count_weights(model.trainable),
           },
           "exchanges": [(ex.read, ex.write) for ex in exchanges],
           "rounds": args.rounds,

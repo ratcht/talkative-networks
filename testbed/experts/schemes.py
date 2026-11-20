@@ -8,8 +8,8 @@ correlation learning trains all experts together, which a per-expert
 
 Most schemes train each expert on its own and differ only in what each expert
 sees. Those subclass IndependentScheme and say, per expert, which seed to use
-(a Recipe) and what to sample (sampler). The optimiser, epoch loop and budget
-are shared, so independent schemes are directly comparable.
+and what to train on (a Recipe). The optimiser, epoch loop and budget are
+shared, so independent schemes are directly comparable.
 """
 
 from abc import ABC, abstractmethod
@@ -18,15 +18,9 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import (
-  DataLoader,
-  RandomSampler,
-  Sampler,
-  SubsetRandomSampler,
-  WeightedRandomSampler,
-)
+from torch.utils.data import RandomSampler, WeightedRandomSampler
 
-from testbed.data import Data
+from testbed.data import Data, Split, batches, concat
 from testbed.experts.architectures import Expert, build
 from testbed.seeds import derive, generator, seeded
 
@@ -63,7 +57,9 @@ class Recipe:
   """What one independently trained expert gets."""
 
   seed: int
+  train: Split
   profile: dict
+  weights: torch.Tensor | None = None  # one per image of train, to skew the draws
 
 
 class IndependentScheme(Scheme):
@@ -72,17 +68,13 @@ class IndependentScheme(Scheme):
   @abstractmethod
   def recipes(self, data: Data, size: int, seed: int) -> list[Recipe]: ...
 
-  @abstractmethod
-  def sampler(self, data: Data, profile: dict, gen: torch.Generator) -> Sampler: ...
-
   def train_pool(
     self, arch: str, data: Data, size: int, seed: int, budget: Budget
   ) -> list[TrainedExpert]:
-    experts = []
-    for r in self.recipes(data, size, seed):
-      sampler = self.sampler(data, r.profile, generator(derive(r.seed, "batches")))
-      experts.append(TrainedExpert(fit(arch, data, r.seed, sampler, budget), r.profile))
-    return experts
+    return [
+      TrainedExpert(fit(arch, data, r, budget), r.profile)
+      for r in self.recipes(data, size, seed)
+    ]
 
 
 def new_expert(arch: str, data: Data, seed: int) -> Expert:
@@ -91,10 +83,15 @@ def new_expert(arch: str, data: Data, seed: int) -> Expert:
   return model.to(data.device)
 
 
-def fit(arch: str, data: Data, seed: int, sampler: Sampler, budget: Budget) -> Expert:
-  model = new_expert(arch, data, seed)
+def fit(arch: str, data: Data, recipe: Recipe, budget: Budget) -> Expert:
+  model = new_expert(arch, data, recipe.seed)
   optimizer = torch.optim.Adam(model.parameters(), lr=budget.lr)
-  loader = DataLoader(data.expert, budget.batch_size, sampler=sampler)
+  gen = generator(derive(recipe.seed, "batches"))
+  if recipe.weights is None:
+    sampler = RandomSampler(recipe.train, generator=gen)
+  else:
+    sampler = WeightedRandomSampler(recipe.weights, len(recipe.train), generator=gen)
+  loader = batches(recipe.train, budget.batch_size, sampler)
   model.train()
   for _ in range(budget.epochs):
     for x, y in loader:
@@ -114,10 +111,20 @@ class SeedOnly(IndependentScheme):
     return {"name": "seed_only"}
 
   def recipes(self, data: Data, size: int, seed: int) -> list[Recipe]:
-    return [Recipe(derive(seed, "expert", i), {}) for i in range(size)]
+    return [Recipe(derive(seed, "expert", i), data.expert, {}) for i in range(size)]
 
-  def sampler(self, data: Data, profile: dict, gen: torch.Generator) -> Sampler:
-    return RandomSampler(data.expert, generator=gen)
+
+@dataclass(frozen=True)
+class ExpertAndJoint(IndependentScheme):
+  """SeedOnly, trained on the expert and joint parts together: a model given
+  every image an ensemble's experts and its channel were trained on."""
+
+  def config(self) -> dict:
+    return {"name": "expert_and_joint"}
+
+  def recipes(self, data: Data, size: int, seed: int) -> list[Recipe]:
+    train = concat([data.expert, data.joint])
+    return [Recipe(derive(seed, "expert", i), train, {}) for i in range(size)]
 
 
 @dataclass(frozen=True)
@@ -133,20 +140,21 @@ class ClassSkew(IndependentScheme):
     return {"name": "class_skew", "alpha": self.alpha}
 
   def recipes(self, data: Data, size: int, seed: int) -> list[Recipe]:
+    y = data.expert.y
+    counts = torch.bincount(y, minlength=data.num_classes).float()
     recipes = []
     for i in range(size):
       expert_seed = derive(seed, "expert", i)
       mix = np.random.default_rng(derive(expert_seed, "class_mix")).dirichlet(
         [self.alpha] * data.num_classes
       )
-      recipes.append(Recipe(expert_seed, {"class_mix": mix.tolist()}))
+      weights = torch.as_tensor(mix, dtype=torch.float32)[y] / counts[y]
+      recipes.append(
+        Recipe(
+          expert_seed, data.expert, {"class_mix": mix.round(4).tolist()}, weights
+        )
+      )
     return recipes
-
-  def sampler(self, data: Data, profile: dict, gen: torch.Generator) -> Sampler:
-    y = data.expert.y
-    counts = torch.bincount(y, minlength=data.num_classes).float()
-    weights = torch.tensor(profile["class_mix"])[y] / counts[y]
-    return WeightedRandomSampler(weights, len(y), generator=gen)
 
 
 @dataclass(frozen=True)
@@ -157,18 +165,14 @@ class PerDataset(IndependentScheme):
     return {"name": "per_dataset"}
 
   def recipes(self, data: Data, size: int, seed: int) -> list[Recipe]:
-    names = list(data.expert_sizes)
-    return [
-      Recipe(derive(seed, "expert", i), {"dataset": names[i % len(names)]})
-      for i in range(size)
-    ]
-
-  def sampler(self, data: Data, profile: dict, gen: torch.Generator) -> Sampler:
-    names = list(data.expert_sizes)
-    before = names[: names.index(profile["dataset"])]
-    start = sum(data.expert_sizes[name] for name in before)
-    stop = start + data.expert_sizes[profile["dataset"]]
-    return SubsetRandomSampler(range(start, stop), generator=gen)
+    names = list(data.expert_parts)
+    recipes = []
+    for i in range(size):
+      name = names[i % len(names)]
+      recipes.append(
+        Recipe(derive(seed, "expert", i), data.expert_parts[name], {"dataset": name})
+      )
+    return recipes
 
 
 @dataclass(frozen=True)
@@ -186,13 +190,15 @@ class Redundant(IndependentScheme):
   def recipes(self, data: Data, size: int, seed: int) -> list[Recipe]:
     base = self.inner.recipes(data, -(-size // self.copies), seed)
     return [
-      Recipe(derive(r.seed, "copy", c), {**r.profile, "recipe": i, "copy": c})
+      Recipe(
+        derive(r.seed, "copy", c),
+        r.train,
+        {**r.profile, "recipe": i, "copy": c},
+        r.weights,
+      )
       for i, r in enumerate(base)
       for c in range(self.copies)
     ][:size]
-
-  def sampler(self, data: Data, profile: dict, gen: torch.Generator) -> Sampler:
-    return self.inner.sampler(data, profile, gen)
 
 
 @dataclass(frozen=True)
@@ -219,7 +225,9 @@ class NegativeCorrelation(Scheme):
       [p for m in models for p in m.parameters()], lr=budget.lr
     )
     gen = generator(derive(seed, "batches"))
-    loader = DataLoader(data.expert, budget.batch_size, shuffle=True, generator=gen)
+    loader = batches(
+      data.expert, budget.batch_size, RandomSampler(data.expert, generator=gen)
+    )
     for m in models:
       m.train()
     for _ in range(budget.epochs):

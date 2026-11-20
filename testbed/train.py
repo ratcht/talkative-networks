@@ -24,10 +24,9 @@ from functools import partial
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
 
 from testbed.communication.ensemble import CommunicatingEnsemble, Output, average
-from testbed.data import Data, Split
+from testbed.data import Data, Split, batches
 from testbed.moe import GatedEnsemble
 from testbed.metrics import (
   ExchangeMeter,
@@ -103,11 +102,8 @@ def train(
   for _ in range(config.epochs):
     model.train()
     order = torch.randperm(len(data.joint), generator=gen)
-    loader = DataLoader(
-      data.joint, config.batch_size, sampler=order.tolist(), generator=gen
-    )
     logits, weights = [], []
-    for x, y in loader:
+    for x, y in batches(data.joint, config.batch_size, order.tolist()):
       x, y = x.to(data.device), y.to(data.device)
       out = model(x)
       loss = loss_fn(out.logits, y, config.loss, out.weights)
@@ -191,7 +187,7 @@ def predict(
   (N, M) if it has any, and with `measure` a meter per exchange site that has
   read every batch's trace."""
   logits, weights, meters = [], [], {}
-  for x, _ in DataLoader(split, batch_size):
+  for x, _ in batches(split, batch_size):
     out = run(x.to(device))
     logits.append(out.logits)
     if out.weights is not None:

@@ -44,21 +44,21 @@ def test_seed_streams_are_named_and_stable():
   assert derive(1, "expert", 0) != derive(0, "expert", 1)  # no `seed + i` collisions
 
 
-def test_per_dataset_experts_draw_only_from_their_dataset():
-  data = replace(fake_data(n=2000), expert_sizes={"a": 500, "b": 1500})
-  scheme = PerDataset()
-  recipes = scheme.recipes(data, 3, seed=0)
+def test_per_dataset_experts_train_only_on_their_dataset():
+  data = fake_data()
+  a, b = data.expert, data.joint
+  data = replace(data, expert_parts={"a": a, "b": b})
+  recipes = PerDataset().recipes(data, 3, seed=0)
   assert [r.profile["dataset"] for r in recipes] == ["a", "b", "a"]
-  draws = sorted(scheme.sampler(data, recipes[1].profile, generator(0)))
-  assert draws == list(range(500, 2000))
+  assert [r.train for r in recipes] == [a, b, a]
 
 
 def test_class_skew_draws_follow_each_experts_mix():
   data = fake_data(n=2000)
-  scheme = ClassSkew(alpha=1.0)
-  (recipe,) = scheme.recipes(data, 1, seed=3)
-  sampler = scheme.sampler(data, recipe.profile, generator(0))
-  draws = torch.tensor([i for _ in range(100) for i in sampler])
+  (recipe,) = ClassSkew(alpha=1.0).recipes(data, 1, seed=3)
+  draws = torch.multinomial(
+    recipe.weights, 200_000, replacement=True, generator=generator(0)
+  )
   freq = torch.bincount(data.expert.y[draws], minlength=data.num_classes).float() / len(
     draws
   )
