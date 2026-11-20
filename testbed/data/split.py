@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import BatchSampler, DataLoader, Dataset, SequentialSampler
 
 
 @dataclass(frozen=True, eq=False)
@@ -24,8 +24,20 @@ class Split(Dataset):
   def __len__(self) -> int:
     return len(self.y)
 
-  def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor]:
+  def __getitem__(self, i: list[int]) -> tuple[torch.Tensor, torch.Tensor]:
     return self.x[i], self.y[i]
+
+
+def concat(splits: list[Split]) -> Split:
+  return Split(torch.cat([s.x for s in splits]), torch.cat([s.y for s in splits]))
+
+
+def batches(split: Split, batch_size: int, sampler=None) -> DataLoader:
+  # a batch sampler so the split is indexed once per batch, not once per image
+  sampler = SequentialSampler(split) if sampler is None else sampler
+  return DataLoader(
+    split, batch_size=None, sampler=BatchSampler(sampler, batch_size, drop_last=False)
+  )
 
 
 @dataclass(frozen=True, eq=False)
@@ -37,7 +49,7 @@ class Data:
   joint_val: Split
   test: Split
   digest: str  # identifies the partition; part of every cache key
-  expert_sizes: dict[str, int]  # images of each dataset in expert, in order
+  expert_parts: dict[str, Split]  # expert, one split per dataset
   device: str = "cpu"  # where models run; the splits stay on the cpu
 
   @property

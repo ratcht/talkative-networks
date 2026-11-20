@@ -3,6 +3,7 @@ from testbed.experts.pool import Pool, get_pool
 from testbed.experts.schemes import (
   Budget,
   ClassSkew,
+  ExpertAndJoint,
   IndependentScheme,
   NegativeCorrelation,
   PerDataset,
@@ -18,6 +19,7 @@ __all__ = [
   "Budget",
   "ClassSkew",
   "Expert",
+  "ExpertAndJoint",
   "IndependentScheme",
   "NegativeCorrelation",
   "PerDataset",
