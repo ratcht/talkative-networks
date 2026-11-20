@@ -1,4 +1,4 @@
-"""Experts from different digit datasets, tested on one none of them saw (docs/studies/digits-five.md)."""
+"""Experts from different digit datasets, tested on one none of them saw (docs/studies/multiple-datasets.md)."""
 
 STUDY = "multiple-datasets"
 EXPERTS = ("mnist", "svhn", "usps")

@@ -21,7 +21,7 @@ COMMON = (
   f"--trial-seeds 0 1 2 3 4 --tag study={STUDY} --expert-dataset {SOURCES}"
   f" --epochs {EPOCHS} --tag pass={PASS}"
 )
-PER_DATASET = f"--scheme per_dataset --expert-samples {EXPERT_SAMPLES} --experts 3"
+PER_DATASET = f"--scheme per_dataset --expert-samples {EXPERT_SAMPLES} --experts {len(EXPERTS)}"
 CHANNEL = "--encoder linear_taper_gelu --decoder linear_taper_gelu"
 
 JOINT = {
@@ -31,6 +31,12 @@ JOINT = {
 EXCHANGE = {"fwd": "stage1 stage2", "bwd": "stage2 stage1"}
 LOSSES = ("ensemble", "per_expert")
 MIXERS = ("attention", "rmsnorm_attention", "self", "mean")
+# cnn3_large is about the size of the three experts and their channel
+POOLED_ARCHS = ("cnn3", "cnn3_large")
+POOLED_EPOCHS = (10, 30)  # each pooled model is trained once per value
+# the largest gate has more trained weights than the channel
+GATE_READS = ("stage1", "stage2", "stage3")
+GATE_WIDTHS = (8, 32)
 
 
 def arms() -> list[str]:
@@ -42,15 +48,29 @@ def arms() -> list[str]:
       f"--arm experts-on-{test} {PER_DATASET} --joint-dataset {TARGET} --test-dataset {test}"
     )
 
-  # one model trained on everything the three experts were trained on
-  arms.append(
-    f"--arm pooled --scheme seed_only --expert-samples {EXPERT_SAMPLES} --experts 1"
-    f" --joint-dataset {TARGET} --test-dataset {TARGET}"
-  )
+  # one model trained on everything the three experts were trained on, then
+  # on that and the images each setting's channel is trained on
+  pooled = {"experts-data": f"--scheme seed_only --joint-dataset {TARGET}"} | {
+    f"{setting}-data": f"--scheme expert_and_joint {joint}"
+    for setting, joint in JOINT.items()
+  }
+  for arch in POOLED_ARCHS:
+    for trained_on, flags in pooled.items():
+      for epochs in POOLED_EPOCHS:
+        arms.append(
+          f"--arm pooled-{arch}-{trained_on}-{epochs}ep --arch {arch} {flags}"
+          f" --expert-samples {EXPERT_SAMPLES} --experts 1 --expert-epochs {epochs}"
+          f" --test-dataset {TARGET} --tag arch={arch} --tag trained_on={trained_on}"
+        )
 
   for setting, joint in JOINT.items():
     data = f"{PER_DATASET} {joint} --test-dataset {TARGET} --tag setting={setting}"
-    arms.append(f"--arm {setting}-moe {data} --gate linear_taper_gelu")
+    for read in GATE_READS:
+      for width in GATE_WIDTHS:
+        arms.append(
+          f"--arm {setting}-moe-{read}-w{width} {data} --gate linear_taper_gelu"
+          f" --gate-read {read} --width {width}"
+        )
     for loss in LOSSES:
       for direction, exchange in EXCHANGE.items():
         for mixer in MIXERS:
@@ -64,7 +84,10 @@ def arms() -> list[str]:
 
 if __name__ == "__main__":
   # one process per arm, so an arm that crashes can't take the rest with it
+  failed = []
   for arm in arms():
     command = [sys.executable, "-m", "testbed.run", *COMMON.split(), *arm.split()]
     if subprocess.run([*command, *sys.argv[1:]]).returncode != 0:
       print(f"FAILED: {arm}", flush=True)
+      failed.append(arm)
+  sys.exit("\n".join(["failed arms:", *failed]) if failed else 0)
