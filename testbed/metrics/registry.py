@@ -54,7 +54,7 @@ METRICS = (
   Metric(
     "expert_accuracy",
     "Task performance",
-    ("{split}/expert_accuracy",),
+    ("{split}/expert_accuracy", "{split}/expert_accuracy/expert{i}"),
     "Share of the experts' own answers that are correct, after communication.",
   ),
   Metric(

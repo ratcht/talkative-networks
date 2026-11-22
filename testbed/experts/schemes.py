@@ -7,8 +7,8 @@ correlation learning trains all experts together, which a per-expert
 "train from a seed" contract can't express.
 
 Most schemes train each expert on its own and differ only in what each expert
-sees. Those subclass IndependentScheme and say, per expert, which seed and
-which sampler to use (a Recipe). The optimiser, epoch loop and budget are
+sees. Those subclass IndependentScheme and say, per expert, which seed to use
+and what to train on (a Recipe). The optimiser, epoch loop and budget are
 shared, so independent schemes are directly comparable.
 """
 
@@ -18,8 +18,9 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.data import RandomSampler, WeightedRandomSampler
 
-from testbed.data import Data, Sampler, Shuffle, Weighted
+from testbed.data import Data, Split, batches, concat
 from testbed.experts.architectures import Expert, build
 from testbed.seeds import derive, generator, seeded
 
@@ -56,8 +57,9 @@ class Recipe:
   """What one independently trained expert gets."""
 
   seed: int
-  sampler: Sampler
+  train: Split
   profile: dict
+  weights: torch.Tensor | None = None  # one per image of train, to skew the draws
 
 
 class IndependentScheme(Scheme):
@@ -84,14 +86,21 @@ def new_expert(arch: str, data: Data, seed: int) -> Expert:
 def fit(arch: str, data: Data, recipe: Recipe, budget: Budget) -> Expert:
   model = new_expert(arch, data, recipe.seed)
   optimizer = torch.optim.Adam(model.parameters(), lr=budget.lr)
-  gen = generator(derive(recipe.seed, "batches"), data.device)
+  gen = generator(derive(recipe.seed, "batches"))
+  if recipe.weights is None:
+    sampler = RandomSampler(recipe.train, generator=gen)
+  else:
+    sampler = WeightedRandomSampler(recipe.weights, len(recipe.train), generator=gen)
+  loader = batches(recipe.train, budget.batch_size, sampler)
   model.train()
-  for _ in range(budget.epochs):
-    for idx in recipe.sampler.epoch(gen).split(budget.batch_size):
-      loss = F.cross_entropy(model(data.expert.x[idx]), data.expert.y[idx])
-      optimizer.zero_grad(set_to_none=True)
-      loss.backward()
-      optimizer.step()
+  with seeded(derive(recipe.seed, "augment")):
+    for _ in range(budget.epochs):
+      for x, y in loader:
+        x, y = data.augment(x.to(data.device)), y.to(data.device)
+        loss = F.cross_entropy(model(x), y)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
   return model.eval()
 
 
@@ -103,10 +112,20 @@ class SeedOnly(IndependentScheme):
     return {"name": "seed_only"}
 
   def recipes(self, data: Data, size: int, seed: int) -> list[Recipe]:
-    return [
-      Recipe(derive(seed, "expert", i), Shuffle(len(data.expert)), {})
-      for i in range(size)
-    ]
+    return [Recipe(derive(seed, "expert", i), data.expert, {}) for i in range(size)]
+
+
+@dataclass(frozen=True)
+class ExpertAndJoint(IndependentScheme):
+  """SeedOnly, trained on the expert and joint parts together: a model given
+  every image an ensemble's experts and its channel were trained on."""
+
+  def config(self) -> dict:
+    return {"name": "expert_and_joint"}
+
+  def recipes(self, data: Data, size: int, seed: int) -> list[Recipe]:
+    train = concat([data.expert, data.joint])
+    return [Recipe(derive(seed, "expert", i), train, {}) for i in range(size)]
 
 
 @dataclass(frozen=True)
@@ -130,13 +149,29 @@ class ClassSkew(IndependentScheme):
       mix = np.random.default_rng(derive(expert_seed, "class_mix")).dirichlet(
         [self.alpha] * data.num_classes
       )
-      weights = (
-        torch.as_tensor(mix, dtype=torch.float32, device=y.device)[y] / counts[y]
-      )
+      weights = torch.as_tensor(mix, dtype=torch.float32)[y] / counts[y]
       recipes.append(
         Recipe(
-          expert_seed, Weighted(weights, len(y)), {"class_mix": mix.round(4).tolist()}
+          expert_seed, data.expert, {"class_mix": mix.round(4).tolist()}, weights
         )
+      )
+    return recipes
+
+
+@dataclass(frozen=True)
+class PerDataset(IndependentScheme):
+  """Each expert trains on one of the expert datasets, taken in turn."""
+
+  def config(self) -> dict:
+    return {"name": "per_dataset"}
+
+  def recipes(self, data: Data, size: int, seed: int) -> list[Recipe]:
+    names = list(data.expert_parts)
+    recipes = []
+    for i in range(size):
+      name = names[i % len(names)]
+      recipes.append(
+        Recipe(derive(seed, "expert", i), data.expert_parts[name], {"dataset": name})
       )
     return recipes
 
@@ -157,7 +192,10 @@ class Redundant(IndependentScheme):
     base = self.inner.recipes(data, -(-size // self.copies), seed)
     return [
       Recipe(
-        derive(r.seed, "copy", c), r.sampler, {**r.profile, "recipe": i, "copy": c}
+        derive(r.seed, "copy", c),
+        r.train,
+        {**r.profile, "recipe": i, "copy": c},
+        r.weights,
       )
       for i, r in enumerate(base)
       for c in range(self.copies)
@@ -187,12 +225,15 @@ class NegativeCorrelation(Scheme):
     optimizer = torch.optim.Adam(
       [p for m in models for p in m.parameters()], lr=budget.lr
     )
-    gen = generator(derive(seed, "batches"), data.device)
+    gen = generator(derive(seed, "batches"))
+    loader = batches(
+      data.expert, budget.batch_size, RandomSampler(data.expert, generator=gen)
+    )
     for m in models:
       m.train()
     for _ in range(budget.epochs):
-      for idx in Shuffle(len(data.expert)).epoch(gen).split(budget.batch_size):
-        x, y = data.expert.x[idx], data.expert.y[idx]
+      for x, y in loader:
+        x, y = x.to(data.device), y.to(data.device)
         logits = torch.stack([m(x) for m in models])  # (M, B, C)
         probs = logits.softmax(-1)
         spread = (probs - probs.mean(0)).pow(2).sum(-1).mean()

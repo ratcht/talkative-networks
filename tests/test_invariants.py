@@ -8,7 +8,7 @@ run in seconds with no downloads, GPU or MLflow.
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 import torch
@@ -23,10 +23,10 @@ from testbed.communication.channel import (
   PooledEncoder,
   build_channel,
 )
-from testbed.data import Weighted
 from testbed.experts import (
   Budget,
   ClassSkew,
+  PerDataset,
   NegativeCorrelation,
   Redundant,
   SeedOnly,
@@ -44,10 +44,21 @@ def test_seed_streams_are_named_and_stable():
   assert derive(1, "expert", 0) != derive(0, "expert", 1)  # no `seed + i` collisions
 
 
+def test_per_dataset_experts_train_only_on_their_dataset():
+  data = fake_data()
+  a, b = data.expert, data.joint
+  data = replace(data, expert_parts={"a": a, "b": b})
+  recipes = PerDataset().recipes(data, 3, seed=0)
+  assert [r.profile["dataset"] for r in recipes] == ["a", "b", "a"]
+  assert [r.train for r in recipes] == [a, b, a]
+
+
 def test_class_skew_draws_follow_each_experts_mix():
   data = fake_data(n=2000)
   (recipe,) = ClassSkew(alpha=1.0).recipes(data, 1, seed=3)
-  draws = Weighted(recipe.sampler.weights, 200_000).epoch(generator(0))
+  draws = torch.multinomial(
+    recipe.weights, 200_000, replacement=True, generator=generator(0)
+  )
   freq = torch.bincount(data.expert.y[draws], minlength=data.num_classes).float() / len(
     draws
   )
@@ -138,6 +149,8 @@ def test_channel_size_matches_the_docs():
 
 
 ARGS = ["--arm", "a", "--trial-seeds", "0"]
+ARGS += ["--expert-dataset", "fashion", "--joint-dataset", "fashion"]
+ARGS += ["--test-dataset", "fashion"]
 
 
 def test_the_command_line_takes_tags_and_full_flag_names_only():

@@ -15,6 +15,8 @@ Any model joins by being cut into stages: wrap the pieces of an nn.Sequential
 (or the blocks of a pretrained network) in an Expert.
 """
 
+from functools import partial
+
 import torch
 import torch.nn as nn
 
@@ -58,8 +60,9 @@ class Expert(nn.Module):
     return {p: shapes[p] for p in self.points}
 
 
-def cnn3(input_shape: tuple[int, ...], num_classes: int) -> Expert:
-  """Three conv stages and an MLP head; about 98k parameters on 28x28 inputs."""
+def cnn3(input_shape: tuple[int, ...], num_classes: int, width: int = 16) -> Expert:
+  """Three conv stages and an MLP head; about 98k parameters on 28x28 inputs
+  at the default width."""
   channels, size = input_shape[0], input_shape[1]
 
   def stage(c_in: int, c_out: int) -> nn.Module:
@@ -69,14 +72,50 @@ def cnn3(input_shape: tuple[int, ...], num_classes: int) -> Expert:
 
   return Expert(
     {
-      "stage1": stage(channels, 16),
-      "stage2": stage(16, 32),
-      "stage3": stage(32, 64),
+      "stage1": stage(channels, width),
+      "stage2": stage(width, 2 * width),
+      "stage3": stage(2 * width, 4 * width),
       "head": nn.Sequential(
         nn.Flatten(),
-        nn.Linear(64 * (size // 8) ** 2, 128),
+        nn.Linear(4 * width * (size // 8) ** 2, 8 * width),
         nn.ReLU(),
-        nn.Linear(128, num_classes),
+        nn.Linear(8 * width, num_classes),
+      ),
+    }
+  )
+
+
+class Block(nn.Module):
+  def __init__(self, width: int):
+    super().__init__()
+    self.update = nn.Sequential(
+      nn.GroupNorm(1, width),
+      nn.Conv2d(width, width, 3, padding=1),
+      nn.GELU(),
+      nn.Conv2d(width, width, 1),
+    )
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    return x + self.update(x)
+
+
+def stream(input_shape: tuple[int, ...], num_classes: int, width: int) -> Expert:
+  """Six conv blocks that each add to one stream of constant width."""
+
+  def stage() -> nn.Module:
+    return nn.Sequential(Block(width), Block(width))
+
+  return Expert(
+    {
+      "embed": nn.Conv2d(input_shape[0], width, 4, stride=4),
+      "stage1": stage(),
+      "stage2": stage(),
+      "stage3": stage(),
+      "head": nn.Sequential(
+        nn.GroupNorm(1, width),
+        nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(),
+        nn.Linear(width, num_classes),
       ),
     }
   )
@@ -99,7 +138,12 @@ def lenet5(input_shape: tuple[int, ...], num_classes: int) -> Expert:
   )
 
 
-ARCHITECTURES = {"cnn3": cnn3, "lenet5": lenet5}
+ARCHITECTURES = {
+  "cnn3": cnn3,
+  "cnn3_large": partial(cnn3, width=32),
+  "lenet5": lenet5,
+  **{f"stream{d}": partial(stream, width=d) for d in (16, 32, 64, 128)},
+}
 
 
 def build(arch: str, input_shape: tuple[int, ...], num_classes: int) -> Expert:
