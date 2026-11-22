@@ -3,7 +3,9 @@
 import hashlib
 from pathlib import Path
 
+import kornia.augmentation as K
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from datasets import load_dataset
 
@@ -23,12 +25,30 @@ def rgb32(images: torch.Tensor) -> torch.Tensor:
   return F.interpolate(images, size=32, mode="bilinear").expand(-1, 3, -1, -1)
 
 
+def size64(images: torch.Tensor) -> torch.Tensor:
+  return F.interpolate(images, size=64, mode="bilinear", antialias=True)
+
+
+crop_flip = K.AugmentationSequential(
+  K.RandomCrop((64, 64), padding=4), K.RandomHorizontalFlip()
+)
+
 DATASETS = {
   "fashion": {"path": "zalando-datasets/fashion_mnist"},
   "mnist": {"path": "ylecun/mnist", "transform": rgb32},
   "svhn": {"path": "ufldl-stanford/svhn", "name": "cropped_digits"},
   "usps": {"path": "flwrlabs/usps", "transform": rgb32},
   "mnist_m": {"path": "Mike0307/MNIST-M"},
+  **{
+    f"pacs_{domain}": {
+      "path": "flwrlabs/pacs",
+      "domain": domain,
+      "test_frac": 0.2,
+      "transform": size64,
+      "augment": crop_flip,
+    }
+    for domain in ("art_painting", "cartoon", "photo", "sketch")
+  },
 }
 
 
@@ -43,6 +63,12 @@ def load_one(
 ) -> dict:
   entry = DATASETS[name]
   dataset = load_dataset(entry["path"], entry.get("name"), cache_dir=str(root))
+  if "domain" in entry:
+    dataset = dataset.filter(lambda d: d == entry["domain"], input_columns="domain")
+  if "test_frac" in entry:
+    dataset = dataset["train"].train_test_split(
+      entry["test_frac"], stratify_by_column="label", seed=split_seed
+    )
   train = dataset["train"].with_format("torch")[:]
   test = dataset["test"].with_format("torch")[:]
   parts = stratified_split(train["label"].numpy(), fracs, split_seed)
@@ -101,6 +127,9 @@ def load(
   num_classes = datasets[expert_ds[0]]["num_classes"]
   assert all(dataset["num_classes"] == num_classes for dataset in datasets.values())
 
+  augments = [DATASETS[name].get("augment") for name in expert_ds]
+  assert all(augment is augments[0] for augment in augments)
+
   digests = [dataset["digest"] for dataset in datasets.values()]
   key = repr((expert_ds, joint_ds, test_ds, expert_samples, joint_samples, digests))
   return Data(
@@ -113,4 +142,5 @@ def load(
     digest=hashlib.sha256(key.encode()).hexdigest()[:16],
     expert_parts={name: concat_splits([split]) for name, split in expert.items()},
     device=device,
+    augment=augments[0] or nn.Identity(),
   )

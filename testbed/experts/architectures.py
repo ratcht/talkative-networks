@@ -85,6 +85,42 @@ def cnn3(input_shape: tuple[int, ...], num_classes: int, width: int = 16) -> Exp
   )
 
 
+class Block(nn.Module):
+  def __init__(self, width: int):
+    super().__init__()
+    self.update = nn.Sequential(
+      nn.GroupNorm(1, width),
+      nn.Conv2d(width, width, 3, padding=1),
+      nn.GELU(),
+      nn.Conv2d(width, width, 1),
+    )
+
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
+    return x + self.update(x)
+
+
+def stream(input_shape: tuple[int, ...], num_classes: int, width: int) -> Expert:
+  """Six conv blocks that each add to one stream of constant width."""
+
+  def stage() -> nn.Module:
+    return nn.Sequential(Block(width), Block(width))
+
+  return Expert(
+    {
+      "embed": nn.Conv2d(input_shape[0], width, 4, stride=4),
+      "stage1": stage(),
+      "stage2": stage(),
+      "stage3": stage(),
+      "head": nn.Sequential(
+        nn.GroupNorm(1, width),
+        nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(),
+        nn.Linear(width, num_classes),
+      ),
+    }
+  )
+
+
 def lenet5(input_shape: tuple[int, ...], num_classes: int) -> Expert:
   """Classic LeNet-5 (2 conv + 3 FC); about 62k parameters on 28x28 inputs."""
   channels, size = input_shape[0], input_shape[1]
@@ -102,7 +138,12 @@ def lenet5(input_shape: tuple[int, ...], num_classes: int) -> Expert:
   )
 
 
-ARCHITECTURES = {"cnn3": cnn3, "cnn3_large": partial(cnn3, width=32), "lenet5": lenet5}
+ARCHITECTURES = {
+  "cnn3": cnn3,
+  "cnn3_large": partial(cnn3, width=32),
+  "lenet5": lenet5,
+  **{f"stream{d}": partial(stream, width=d) for d in (16, 32, 64, 128)},
+}
 
 
 def build(arch: str, input_shape: tuple[int, ...], num_classes: int) -> Expert:

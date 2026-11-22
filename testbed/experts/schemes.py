@@ -93,13 +93,14 @@ def fit(arch: str, data: Data, recipe: Recipe, budget: Budget) -> Expert:
     sampler = WeightedRandomSampler(recipe.weights, len(recipe.train), generator=gen)
   loader = batches(recipe.train, budget.batch_size, sampler)
   model.train()
-  for _ in range(budget.epochs):
-    for x, y in loader:
-      x, y = x.to(data.device), y.to(data.device)
-      loss = F.cross_entropy(model(x), y)
-      optimizer.zero_grad(set_to_none=True)
-      loss.backward()
-      optimizer.step()
+  with seeded(derive(recipe.seed, "augment")):
+    for _ in range(budget.epochs):
+      for x, y in loader:
+        x, y = data.augment(x.to(data.device)), y.to(data.device)
+        loss = F.cross_entropy(model(x), y)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
   return model.eval()
 
 

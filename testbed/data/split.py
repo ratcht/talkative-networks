@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.utils.data import BatchSampler, DataLoader, Dataset, SequentialSampler
 
 
@@ -51,6 +52,7 @@ class Data:
   digest: str  # identifies the partition; part of every cache key
   expert_parts: dict[str, Split]  # expert, one split per dataset
   device: str = "cpu"  # where models run; the splits stay on the cpu
+  augment: nn.Module = nn.Identity()  # applied to the batches experts train on
 
   @property
   def input_shape(self) -> tuple[int, ...]:
