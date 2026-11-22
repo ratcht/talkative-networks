@@ -4,7 +4,7 @@
 a trained channel between them classify a dataset none of them saw better
 than the same experts without communication?
 
-Plan: [digits-five.md](../../docs/studies/digits-five.md).
+Report: [digits-five.md](../../docs/studies/digits-five.md). Plan of the second version: [digits-five-v2.md](../../docs/studies/digits-five-v2.md).
 
 > **Running now (started 2026-11-16).** One job runs every arm below:
 >
