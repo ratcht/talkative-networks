@@ -14,7 +14,8 @@ the root of every stream in it:
   trial seed
   ├─ "pool"     pool seed
   │   ├─ "class_partition", "shards"   how the pool splits the examples
-  │   └─ "expert", i   expert seed: "init", "batches", "class_mix", ...
+  │   ├─ "batches", "augment"   negative correlation's shared batches and crops
+  │   └─ "expert", i   expert seed: "init", "batches", "augment", "class_mix", ...
   ├─ "group"    which experts of the pool communicate
   ├─ "channel"  the channel's initial weights
   └─ "joint"    joint training of the channel: "batches"

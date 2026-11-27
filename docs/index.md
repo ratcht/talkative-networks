@@ -2,8 +2,10 @@
 
 Docs for communicating ensembles of frozen experts.
 
-**Testbed (v3)**, the current pipeline in `testbed/`:
+**Testbed (v4)**, the current pipeline in `testbed/`:
 
+- [Experts](testbed/experts.md): the residual stream every channel reads and
+  writes, the ResNet and ViT families, and their recipes.
 - [Channel](testbed/channel.md): the communication channel's parts, its two
   controls, and their sizes.
 - [Soft-gated MoE](testbed/moe.md): the baseline that weighs the experts'

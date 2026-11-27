@@ -158,8 +158,8 @@ def test_disjoint_subsets_from_the_command_line():
 @pytest.mark.parametrize("scheme", [DisjointSubset(0.1), DataShard()])
 def test_disjoint_parts_train_and_reload_from_the_cache(scheme, tmp_path):
   data, budget = fake_data(), Budget(1, 50)
-  first = get_pool(scheme, "cnn3", data, 3, seed=0, budget=budget, root=tmp_path)
-  again = get_pool(scheme, "cnn3", data, 3, seed=0, budget=budget, root=tmp_path)
+  first = get_pool(scheme, "tiny_resnet", data, 3, seed=0, budget=budget, root=tmp_path)
+  again = get_pool(scheme, "tiny_resnet", data, 3, seed=0, budget=budget, root=tmp_path)
   assert first.digest == again.digest
   assert [e.profile for e in again.experts] == [e.profile for e in first.experts]
 
@@ -170,26 +170,26 @@ GELU = ChannelConfig("linear_taper_gelu", decoder="linear_taper_gelu")
 @pytest.mark.parametrize(
   "exchanges, rounds, config",
   [
-    ([Exchange("stage1", "stage2")], 1, ChannelConfig()),
-    ([Exchange("stage2", "stage1")], 2, ChannelConfig()),
-    ([Exchange("stage1", "stage3")], 1, ChannelConfig("linear_taper_gelu")),
-    ([Exchange("stage3", "stage1")], 3, ChannelConfig(decoder="linear_taper_gelu")),
-    ([Exchange("stage2", "stage3")], 1, GELU),
-    ([Exchange("stage3", "stage2")], 2, GELU),
-    ([Exchange("stage2", "stage3")], 1, ChannelConfig(mixer="self")),
-    ([Exchange("stage3", "stage2")], 2, ChannelConfig(mixer="mean")),
-    ([Exchange("stage2", "stage3")], 1, ChannelConfig(mixer="rmsnorm_attention")),
-    ([Exchange("stage3", "stage1")], 2, ChannelConfig(mixer="rmsnorm_attention")),
-    ([Exchange("stage1", "stage2")], 1, ChannelConfig("pooled", decoder="broadcast")),
-    ([Exchange("stage1", "stage3")], 1, ChannelConfig("spatial", decoder="spatial")),
-    ([Exchange("stage2", "stage1")], 1, ChannelConfig("pooled", decoder="broadcast")),
-    ([Exchange("stage3", "stage1")], 3, ChannelConfig("spatial", decoder="spatial")),
+    ([Exchange("block1", "block2")], 1, ChannelConfig()),
+    ([Exchange("block2", "block1")], 2, ChannelConfig()),
+    ([Exchange("block1", "block3")], 1, ChannelConfig("linear_taper_gelu")),
+    ([Exchange("block3", "block1")], 3, ChannelConfig(decoder="linear_taper_gelu")),
+    ([Exchange("block2", "block3")], 1, GELU),
+    ([Exchange("block3", "block2")], 2, GELU),
+    ([Exchange("block2", "block3")], 1, ChannelConfig(mixer="self")),
+    ([Exchange("block3", "block2")], 2, ChannelConfig(mixer="mean")),
+    ([Exchange("block2", "block3")], 1, ChannelConfig(mixer="rmsnorm_attention")),
+    ([Exchange("block3", "block1")], 2, ChannelConfig(mixer="rmsnorm_attention")),
+    ([Exchange("block1", "block2")], 1, ChannelConfig("pooled", decoder="broadcast")),
+    ([Exchange("block1", "block3")], 1, ChannelConfig("spatial", decoder="spatial")),
+    ([Exchange("block2", "block1")], 1, ChannelConfig("pooled", decoder="broadcast")),
+    ([Exchange("block3", "block1")], 3, ChannelConfig("spatial", decoder="spatial")),
     ([], 1, ChannelConfig()),
   ],
 )
 def test_untrained_channel_is_bagging(exchanges, rounds, config):
   model = build_ensemble(
-    random_experts(), exchanges, config, (1, 28, 28), rounds, seed=0
+    random_experts(), exchanges, config, (3, 32, 32), rounds, seed=0
   )
   x = fake_data().joint_val.x
   with torch.no_grad():
@@ -234,8 +234,8 @@ def test_channel_size_matches_the_docs():
   + 2 key + value weights, so a forward exchange and its backward mirror match."""
   config = ChannelConfig()
   r, k, v = config.width, config.key_dim, config.value_dim
-  shapes = {"stage1": (16, 14, 14), "stage2": (32, 7, 7), "stage3": (64, 3, 3)}
-  for a, b in (("stage1", "stage2"), ("stage2", "stage3"), ("stage1", "stage3")):
+  shapes = {"block1": (16, 14, 14), "block2": (32, 7, 7), "block3": (64, 3, 3)}
+  for a, b in (("block1", "block2"), ("block2", "block3"), ("block1", "block3")):
     there = count(build_channel(config, shapes[a], shapes[b], num_experts=1))
     back = count(build_channel(config, shapes[b], shapes[a], num_experts=1))
     size = math.prod(shapes[a]) + math.prod(shapes[b])
@@ -377,11 +377,11 @@ def test_an_encoder_sends_one_message_per_expert():
 
 @pytest.mark.parametrize(
   "exchanges, rounds",
-  [([Exchange("stage1", "stage2")], 1), ([Exchange("stage2", "stage1")], 2)],
+  [([Exchange("block1", "block2")], 1), ([Exchange("block2", "block1")], 2)],
 )
 def test_only_the_channel_trains(exchanges, rounds):
   model = build_ensemble(
-    random_experts(), exchanges, ChannelConfig(), (1, 28, 28), rounds, seed=0
+    random_experts(), exchanges, ChannelConfig(), (3, 32, 32), rounds, seed=0
   )
   experts_before = [p.clone() for p in model.experts.parameters()]
   channel_before = [p.clone() for p in model.channels.parameters()]
@@ -408,42 +408,42 @@ def test_only_the_channel_trains(exchanges, rounds):
 @pytest.mark.parametrize(
   "exchanges, rounds",
   [
-    ([Exchange("stage2", "stage2")], 1),  # reads and writes at one point
-    ([Exchange("stage1", "stage2"), Exchange("stage2", "stage3")], 1),  # shares a point
-    ([Exchange("stage1", "stage3"), Exchange("stage2", "stage3")], 1),  # overlaps
-    ([Exchange("stage3", "stage1"), Exchange("stage2", "stage1")], 1),  # two backward
-    ([Exchange("stage1", "stage2")], 2),  # rounds on a forward exchange
-    ([Exchange("stage1", "head")], 1),  # the head's output isn't a point
+    ([Exchange("block2", "block2")], 1),  # reads and writes at one point
+    ([Exchange("block1", "block2"), Exchange("block2", "block3")], 1),  # shares a point
+    ([Exchange("block1", "block3"), Exchange("block2", "block3")], 1),  # overlaps
+    ([Exchange("block3", "block1"), Exchange("block2", "block1")], 1),  # two backward
+    ([Exchange("block1", "block2")], 2),  # rounds on a forward exchange
+    ([Exchange("block1", "head")], 1),  # the head's output isn't a point
   ],
 )
 def test_invalid_exchanges_are_rejected(exchanges, rounds):
   with pytest.raises(ValueError):
     build_ensemble(
-      random_experts(), exchanges, ChannelConfig(), (1, 28, 28), rounds, seed=0
+      random_experts(), exchanges, ChannelConfig(), (3, 32, 32), rounds, seed=0
     )
 
 
 def test_negative_correlation_trains_a_pool_jointly():
   pool = NegativeCorrelation(lam=0.5).train_pool(
-    "lenet5", fake_data(), 3, seed=0, budget=Budget(1, 50)
+    "tiny_vit", fake_data(), 3, seed=0, budget=Budget(1, 50)
   )
   assert len(pool) == 3
   assert not any(e.model.training for e in pool)
   assert not torch.equal(
-    pool[0].model.stages["head"][-1].weight, pool[1].model.stages["head"][-1].weight
+    pool[0].model.stages["head"].fc.weight, pool[1].model.stages["head"].fc.weight
   )
 
 
 def test_untrained_experts_are_the_weights_other_schemes_start_from(tmp_path):
   data = fake_data()
   untrained = get_pool(
-    Untrained(), "cnn3", data, 3, seed=0, budget=Budget(1, 50), root=tmp_path
+    Untrained(), "tiny_resnet", data, 3, seed=0, budget=Budget(1, 50), root=tmp_path
   )
   no_training = get_pool(
-    SeedOnly(), "cnn3", data, 3, seed=0, budget=Budget(0, 50), root=tmp_path
+    SeedOnly(), "tiny_resnet", data, 3, seed=0, budget=Budget(0, 50), root=tmp_path
   )
   trained = get_pool(
-    SeedOnly(), "cnn3", data, 3, seed=0, budget=Budget(1, 50), root=tmp_path
+    SeedOnly(), "tiny_resnet", data, 3, seed=0, budget=Budget(1, 50), root=tmp_path
   )
   assert untrained.digest == no_training.digest != trained.digest
   assert not any(e.model.training for e in untrained.experts)
@@ -451,19 +451,25 @@ def test_untrained_experts_are_the_weights_other_schemes_start_from(tmp_path):
 
 def test_a_group_can_hold_one_expert_more_than_once(tmp_path):
   data, budget = fake_data(), Budget(1, 50)
-  pool = get_pool(SeedOnly(), "cnn3", data, 3, seed=0, budget=budget, root=tmp_path)
+  pool = get_pool(
+    SeedOnly(), "tiny_resnet", data, 3, seed=0, budget=budget, root=tmp_path
+  )
   group = ClonesOfFirst().select(pool, 3, seed=0)
   assert group == [0, 0, 0]
-  experts = group_experts(pool, group, 0, "cnn3", data, pool_seed=0)
+  experts = group_experts(pool, group, 0, "tiny_resnet", data, pool_seed=0)
   assert len({id(e.model) for e in [*experts, pool.experts[0]]}) == 4  # all its own
   assert weights_digest(experts) == weights_digest([pool.experts[0]] * 3)
 
 
 def test_untrained_members_replace_only_the_end_of_the_group(tmp_path):
   data, budget = fake_data(), Budget(1, 50)
-  pool = get_pool(SeedOnly(), "cnn3", data, 3, seed=0, budget=budget, root=tmp_path)
-  before = get_pool(Untrained(), "cnn3", data, 3, seed=0, budget=budget, root=tmp_path)
-  experts = group_experts(pool, [0, 1, 2], 1, "cnn3", data, pool_seed=0)
+  pool = get_pool(
+    SeedOnly(), "tiny_resnet", data, 3, seed=0, budget=budget, root=tmp_path
+  )
+  before = get_pool(
+    Untrained(), "tiny_resnet", data, 3, seed=0, budget=budget, root=tmp_path
+  )
+  experts = group_experts(pool, [0, 1, 2], 1, "tiny_resnet", data, pool_seed=0)
   assert weights_digest(experts[:2]) == weights_digest(pool.experts[:2])
   assert weights_digest(experts[2:]) == weights_digest(before.experts[2:])
   assert experts[2].profile == {"untrained": True}
@@ -479,7 +485,7 @@ def test_a_group_keeps_a_trained_expert(members):
 
 @pytest.mark.parametrize(
   "exchanges, rounds",
-  [([Exchange("stage2", "stage3")], 1), ([Exchange("stage3", "stage1")], 1)],
+  [([Exchange("block2", "block3")], 1), ([Exchange("block3", "block1")], 1)],
 )
 def test_clones_with_identical_channels_have_nothing_to_say(exchanges, rounds):
   """With identical experts and identical encoders and decoders, every expert
@@ -495,7 +501,7 @@ def test_clones_with_identical_channels_have_nothing_to_say(exchanges, rounds):
       [copy.deepcopy(expert) for _ in range(3)],
       exchanges,
       ChannelConfig(mixer=mixer),
-      (1, 28, 28),
+      (3, 32, 32),
       rounds,
       seed=0,
     )
@@ -523,10 +529,14 @@ def test_clones_with_identical_channels_have_nothing_to_say(exchanges, rounds):
 
 def test_pool_cache_returns_the_same_experts(tmp_path):
   data, budget = fake_data(), Budget(1, 50)
-  first = get_pool(SeedOnly(), "cnn3", data, 2, seed=0, budget=budget, root=tmp_path)
-  again = get_pool(SeedOnly(), "cnn3", data, 2, seed=0, budget=budget, root=tmp_path)
+  first = get_pool(
+    SeedOnly(), "tiny_resnet", data, 2, seed=0, budget=budget, root=tmp_path
+  )
+  again = get_pool(
+    SeedOnly(), "tiny_resnet", data, 2, seed=0, budget=budget, root=tmp_path
+  )
   other = get_pool(
-    ClassSkew(0.5), "cnn3", data, 2, seed=0, budget=budget, root=tmp_path
+    ClassSkew(0.5), "tiny_resnet", data, 2, seed=0, budget=budget, root=tmp_path
   )
   assert first.key == again.key != other.key
   assert first.digest == again.digest != other.digest
@@ -554,7 +564,9 @@ def test_runs_asking_at_once_share_one_pool(tmp_path):
   scheme, data, budget = SlowSeedOnly(), fake_data(), Budget(1, 50)
 
   def ask(_):
-    return get_pool(scheme, "cnn3", data, 2, seed=0, budget=budget, root=tmp_path)
+    return get_pool(
+      scheme, "tiny_resnet", data, 2, seed=0, budget=budget, root=tmp_path
+    )
 
   with ThreadPoolExecutor(2) as executor:
     first, second = executor.map(ask, range(2))

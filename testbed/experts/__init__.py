@@ -1,4 +1,14 @@
-from testbed.experts.architectures import ARCHITECTURES, Expert, build
+from testbed.experts.architectures import (
+  ARCHITECTURES,
+  RECIPES,
+  Expert,
+  build,
+  recipe,
+  register,
+  resnet,
+  vit,
+)
+from testbed.experts.recipes import Trainer
 from testbed.experts.pool import Pool, get_pool
 from testbed.experts.schemes import (
   Budget,
@@ -18,6 +28,12 @@ from testbed.experts.schemes import (
 
 __all__ = [
   "ARCHITECTURES",
+  "RECIPES",
+  "Trainer",
+  "recipe",
+  "register",
+  "resnet",
+  "vit",
   "Budget",
   "ClassSkew",
   "DataShard",

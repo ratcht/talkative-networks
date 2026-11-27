@@ -113,7 +113,7 @@ def test_answering_each_round_changes_nothing_else():
   gen = torch.Generator().manual_seed(0)
   x = fake_data().joint_val.x
   backward = build_ensemble(
-    random_experts(), [Exchange("stage3", "stage1")], ChannelConfig(), (1, 28, 28), 3, 0
+    random_experts(), [Exchange("block3", "block1")], ChannelConfig(), (3, 32, 32), 3, 0
   )
   with torch.no_grad():
     for p in backward.channels.parameters():  # off zero, so the rounds differ
@@ -126,7 +126,7 @@ def test_answering_each_round_changes_nothing_else():
   assert not torch.equal(each.traces[0].answers, each.traces[-1].answers)
 
   forward = build_ensemble(
-    random_experts(), [Exchange("stage1", "stage2")], ChannelConfig(), (1, 28, 28), 1, 0
+    random_experts(), [Exchange("block1", "block2")], ChannelConfig(), (3, 32, 32), 1, 0
   )
   with torch.no_grad():
     assert all(t.answers is None for t in forward(x, answer_each_round=True).traces)
@@ -320,7 +320,7 @@ def test_spread_by_construction():
 
 def test_gradient_norms_split_the_total():
   model = build_ensemble(
-    random_experts(), [Exchange("stage1", "stage2")], ChannelConfig(), (1, 28, 28), 1, 0
+    random_experts(), [Exchange("block1", "block2")], ChannelConfig(), (3, 32, 32), 1, 0
   )
   meter = OptimisationMeter(model.channels)
   data = fake_data()
@@ -353,7 +353,7 @@ def test_a_part_that_starts_at_zero_is_measured_from_its_first_move():
   """The linear decoder's patterns start at zero. Their first step has no size
   to compare to, so it is skipped rather than read as an enormous ratio."""
   model = build_ensemble(
-    random_experts(), [Exchange("stage1", "stage2")], ChannelConfig(), (1, 28, 28), 1, 0
+    random_experts(), [Exchange("block1", "block2")], ChannelConfig(), (3, 32, 32), 1, 0
   )
   meter = OptimisationMeter(model.channels)
   for _ in range(2):  # zero to 0.01 everywhere, then 0.01 to 0.02: a ratio of 1
@@ -391,25 +391,25 @@ class Recorder:
 
 
 ARMS = {
-  "forward": ([Exchange("stage1", "stage2")], 1, ChannelConfig()),
-  "forward_self": ([Exchange("stage1", "stage2")], 1, ChannelConfig(mixer="self")),
+  "forward": ([Exchange("block1", "block2")], 1, ChannelConfig()),
+  "forward_self": ([Exchange("block1", "block2")], 1, ChannelConfig(mixer="self")),
   "forward_rmsnorm": (
-    [Exchange("stage1", "stage2")],
+    [Exchange("block1", "block2")],
     1,
     ChannelConfig(mixer="rmsnorm_attention"),
   ),
   "forward_broadcast": (
-    [Exchange("stage1", "stage3")],
+    [Exchange("block1", "block3")],
     1,
     ChannelConfig(encoder="pooled", decoder="broadcast"),
   ),
   "forward_spatial": (
-    [Exchange("stage1", "stage3")],
+    [Exchange("block1", "block3")],
     1,
     ChannelConfig(encoder="spatial", decoder="spatial"),
   ),
   "backward": (
-    [Exchange("stage3", "stage1")],
+    [Exchange("block3", "block1")],
     2,
     ChannelConfig(encoder="linear_taper_gelu", decoder="linear_taper_gelu"),
   ),

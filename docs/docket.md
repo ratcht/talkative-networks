@@ -1,3 +1,49 @@
+# Docket
+
+## v4: residual-stream experts (2026-11-27)
+
+v4 is v3 with experts that keep a uniform residual stream (docs/testbed/experts.md).
+
+Decided by the user on 2026-11-27, after the v4 task-model selection
+(`docs/reports/v4-traditional-pairs/`):
+
+- **Experts.** CIFAR-100 for both families. The ResNet is an isotropic
+  pre-activation ResNet $12\times64$ with its usual recipe, 100 epochs. The ViT is
+  the standard ViT $12\times96$ with crop and flip, 200 epochs: the selection's
+  option (b), which meets every threshold, though its experts fit their
+  training images completely and the single models it was compared with were
+  weak.
+- **Channel.** Every expert keeps its own encoder and decoder, which read and
+  write only in the residual stream: at `embed` and after each block, by
+  adding to the stream. The selection found that independently trained
+  experts can't read each other's raw stream, so the encoder and decoder stay.
+- **Expert generation** stays modular as in v3: a pool can be seed-only or
+  class-skewed (or any other scheme).
+- **Joint training** uses no augmentation, as in v3.
+- **From the oversampling-diversity study branch:** `merge_runs.py`, the
+  encoder readings with top-k overlap, and the DisjointSubset, DataShard and
+  Untrained schemes.
+
+Claude's choices while building, pending the user's confirmation:
+
+- The study branch's other testbed changes came along, being entangled with
+  the readings: `msg_spread`, per-expert `msg_norm`, `attn_heard`,
+  `weight_norm`, per-expert `expert_accuracy`, and `results.picked_by`.
+- The ViT's stream is handed over channels first, `(B, d, 65)`, so every
+  position-based part and metric treats the class token as position 0, like
+  any patch.
+- Images are normalised per channel (v3 used one scalar, the same thing for
+  one channel).
+- `--scheme` keeps v3's default, class skew at α = 1, which is unmeasured on
+  CIFAR-100's 100 classes; the selection measured seed-only experts.
+- Augmentation has its own seed stream (`"augment"`), apart from the batch order.
+
+Open for v4:
+- which points to read and write: with 12 blocks there are 13 points, against
+  v3's 3;
+- the default scheme, and α for class skew over 100 classes;
+- joint-training epochs and learning rate on the new experts.
+
 # v3 docket
 
 ## Expert generation: different expertise, same input

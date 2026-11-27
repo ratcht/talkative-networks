@@ -2,10 +2,10 @@
 Run one arm of a study over a list of trial seeds.
 
   uv run python -m testbed.run --arm bagging  --trial-seeds 0 1 2
-  uv run python -m testbed.run --arm forward  --exchange stage1 stage2 --trial-seeds 0 1 2
-  uv run python -m testbed.run --arm forward-self --exchange stage1 stage2 --mixer self --trial-seeds 0 1 2
-  uv run python -m testbed.run --arm backward --exchange stage2 stage1 --rounds 2 --trial-seeds 0 1 2
-  uv run python -m testbed.run --arm moe --gate linear_taper_gelu --gate-read stage3 --trial-seeds 0 1 2
+  uv run python -m testbed.run --arm forward  --exchange block4 block8 --trial-seeds 0 1 2
+  uv run python -m testbed.run --arm forward-self --exchange block4 block8 --mixer self --trial-seeds 0 1 2
+  uv run python -m testbed.run --arm backward --exchange block8 block4 --rounds 2 --trial-seeds 0 1 2
+  uv run python -m testbed.run --arm moe --gate linear_taper_gelu --gate-read block12 --trial-seeds 0 1 2
 
 An arm is bagging (no exchange), a communicating ensemble (--exchange), or the
 soft-gated MoE baseline (--gate, testbed/moe.py), which weighs the experts'
@@ -44,7 +44,6 @@ from testbed.metrics import description
 from testbed.moe import GATES, GateConfig, build_gated
 from testbed.experts import (
   ARCHITECTURES,
-  Budget,
   ClassSkew,
   DataShard,
   DisjointSubset,
@@ -57,6 +56,7 @@ from testbed.experts import (
   TrainedExpert,
   Untrained,
   get_pool,
+  recipe,
   untrained_expert,
 )
 from testbed.results import epochs_around_best, median_around_best
@@ -164,12 +164,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   p.add_argument("--trial-seeds", type=int, nargs="+", required=True)
 
   data = p.add_argument_group("data")
-  data.add_argument("--dataset", choices=DATASETS, default="fashion")
+  data.add_argument("--dataset", choices=DATASETS, default="cifar100")
   data.add_argument("--split-seed", type=int, default=0, help="pinned while iterating")
   data.add_argument("--device", default="cuda")
 
   experts = p.add_argument_group("experts")
-  experts.add_argument("--arch", choices=ARCHITECTURES, default="cnn3")
+  experts.add_argument("--arch", choices=ARCHITECTURES, default="resnet")
   experts.add_argument("--scheme", choices=SCHEMES, default="class_skew")
   experts.add_argument(
     "--alpha", type=float, default=1.0, help="class_skew: Dirichlet concentration"
@@ -191,7 +191,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     default=1,
     help="> 1 makes experts redundant in groups of this size",
   )
-  experts.add_argument("--expert-epochs", type=int, default=10)
+  experts.add_argument(
+    "--expert-epochs",
+    type=int,
+    default=None,
+    help="defaults to the architecture's own recipe (docs/testbed/experts.md)",
+  )
   experts.add_argument("--experts", type=int, default=3, help="M, the group size")
   experts.add_argument(
     "--pool-size",
@@ -254,7 +259,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   joint.add_argument("--loss", choices=("ensemble", "per_expert"), default="ensemble")
 
   tracking = p.add_argument_group("tracking")
-  tracking.add_argument("--experiment", default="v3")
+  tracking.add_argument("--experiment", default="v4")
   tracking.add_argument("--no-track", action="store_true")
   tracking.add_argument(
     "--tag",
@@ -291,7 +296,9 @@ def main(
   )
   data = load(args.dataset, split_seed=args.split_seed, device=args.device)
   scheme = make_scheme(args)
-  budget = Budget(epochs=args.expert_epochs)
+  budget = recipe(args.arch)
+  if args.expert_epochs is not None:
+    budget = replace(budget, epochs=args.expert_epochs)
   pool_size = args.pool_size or args.experts
   selector = SELECTORS[
     args.selector or ("first" if pool_size == args.experts else "random")

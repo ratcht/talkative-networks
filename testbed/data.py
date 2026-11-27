@@ -11,6 +11,10 @@ The official training set is split per class into
   joint      trains the communication channel
   joint_val  picks the epochs each run is read at; never seen by any expert
 The official test set is kept apart and only used for final scores.
+
+Images are scaled to [0, 1] and normalised per channel by the expert split's
+mean and standard deviation. `fill` is a black pixel in those terms, which
+the experts' augmentation pads with.
 """
 
 import hashlib
@@ -23,7 +27,12 @@ import torch
 from torchvision import datasets
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DATASETS = {"fashion": datasets.FashionMNIST, "mnist": datasets.MNIST}
+DATASETS = {
+  "cifar100": datasets.CIFAR100,
+  "cifar10": datasets.CIFAR10,
+  "fashion": datasets.FashionMNIST,
+  "mnist": datasets.MNIST,
+}
 
 
 @dataclass(frozen=True, eq=False)
@@ -44,6 +53,13 @@ class Data:
   joint_val: Split
   test: Split
   digest: str  # identifies the partition; part of every cache key
+  fill: torch.Tensor | None = None  # (C, 1, 1): a black pixel, normalised
+
+  def __post_init__(self):
+    if self.fill is None:
+      object.__setattr__(
+        self, "fill", torch.zeros(self.input_shape[0], 1, 1, device=self.device)
+      )
 
   @property
   def input_shape(self) -> tuple[int, ...]:
@@ -55,7 +71,7 @@ class Data:
 
 
 def load(
-  name: str = "fashion",
+  name: str = "cifar100",
   fracs: tuple[float, float, float] = (0.5, 0.4, 0.1),
   split_seed: int = 0,
   root: Path = REPO_ROOT / "data",
@@ -63,11 +79,13 @@ def load(
 ) -> Data:
   train = DATASETS[name](root, train=True, download=True)
   test = DATASETS[name](root, train=False, download=True)
-  parts = stratified_split(train.targets.numpy(), fracs, split_seed)
+  targets = torch.as_tensor(train.targets)
+  parts = stratified_split(targets.numpy(), fracs, split_seed)
 
-  images = train.data.float().div(255).unsqueeze(1)
+  images = scaled(train.data)
   reference = images[parts["expert"]]
-  mean, std = reference.mean(), reference.std()
+  mean = reference.mean((0, 2, 3), keepdim=True)[0]  # (C, 1, 1)
+  std = reference.std((0, 2, 3), keepdim=True)[0]
 
   def split(x: torch.Tensor, y: torch.Tensor) -> Split:
     return Split(((x - mean) / std).to(device), y.to(device))
@@ -75,10 +93,19 @@ def load(
   return Data(
     name=name,
     num_classes=len(train.classes),
-    **{k: split(images[idx], train.targets[idx]) for k, idx in parts.items()},
-    test=split(test.data.float().div(255).unsqueeze(1), test.targets),
+    **{k: split(images[idx], targets[idx]) for k, idx in parts.items()},
+    test=split(scaled(test.data), torch.as_tensor(test.targets)),
     digest=partition_digest(name, parts),
+    fill=((0 - mean) / std).to(device),
   )
+
+
+def scaled(images) -> torch.Tensor:
+  """A dataset's images as (N, C, H, W) floats in [0, 1]: torchvision keeps
+  MNIST's as (N, H, W) tensors and CIFAR's as (N, H, W, C) arrays."""
+  x = torch.as_tensor(images)
+  x = x.unsqueeze(1) if x.dim() == 3 else x.permute(0, 3, 1, 2)
+  return x.float().div(255).contiguous()
 
 
 def stratified_split(
@@ -105,9 +132,11 @@ def partition_digest(name: str, parts: dict[str, torch.Tensor]) -> str:
 
 
 class Sampler(Protocol):
-  """Draws the example indices for one epoch."""
+  """Draws the example indices for one epoch; its length is how many."""
 
   def epoch(self, gen: torch.Generator) -> torch.Tensor: ...
+
+  def __len__(self) -> int: ...
 
 
 @dataclass(frozen=True)
@@ -119,6 +148,9 @@ class Shuffle:
   def epoch(self, gen: torch.Generator) -> torch.Tensor:
     return torch.randperm(self.size, generator=gen, device=gen.device)
 
+  def __len__(self) -> int:
+    return self.size
+
 
 @dataclass(frozen=True, eq=False)
 class Weighted:
@@ -129,3 +161,6 @@ class Weighted:
 
   def epoch(self, gen: torch.Generator) -> torch.Tensor:
     return torch.multinomial(self.weights, self.draws, replacement=True, generator=gen)
+
+  def __len__(self) -> int:
+    return self.draws

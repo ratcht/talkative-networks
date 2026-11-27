@@ -53,16 +53,16 @@ answer the metrics rebuild from the experts' logits and $g$ is the model's.
 ## 3. Size
 
 The gate has $M (n_{\text{read}} + 1)\, r$ weights in its readings and
-$(M r + 1)\, M$ in its scores. On cnn3 experts with $M = 3$ and $r = 8$:
+$(M r + 1)\, M$ in its scores. Every v4 point is the residual stream, so the
+gate is the same size whichever point it reads. With $M = 3$ and $r = 8$:
 
-| `--gate-read` | $n_{\text{read}}$ | whole gate | per expert |
+| experts | $n_{\text{read}}$ | whole gate | per expert |
 |---|---:|---:|---:|
-| `stage1` | 3,136 | 75,363 | 25,121 |
-| `stage2` | 1,568 | 37,731 | 12,577 |
-| `stage3` | 576 | 13,923 | 4,641 |
+| ResNet $12\times64$ | 16,384 | 393,315 | 131,105 |
+| ViT $12\times96$ | 6,240 | 149,859 | 49,953 |
 
-For comparison, a level-1 channel of the channel ladder is 18,544 to 39,024
-weights per expert, depending on its points ([Channel](channel.md) §5).
+For comparison, a channel of the same width is 263,536 (ResNet) or 101,232
+(ViT) weights per expert ([Channel](channel.md) §5).
 
 ## 4. What it can and can't change
 
@@ -83,7 +83,7 @@ exchanged. `grad_norm` and `update_ratio` report the gate as `gate.read` and
 ## 5. Running it
 
 ```bash
-uv run python -m testbed.run --arm moe --gate linear_taper_gelu --gate-read stage3 \
+uv run python -m testbed.run --arm moe --gate linear_taper_gelu --gate-read block12 \
   --trial-seeds 0 1 2
 ```
 

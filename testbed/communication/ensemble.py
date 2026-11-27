@@ -211,8 +211,12 @@ def build_ensemble(
   rounds: int,
   seed: int,
 ) -> CommunicatingEnsemble:
-  """Size each channel from the experts' point shapes and initialise it on its own seed."""
+  """Size each channel from the experts' point shapes and initialise it on its
+  own seed. Every point must be the experts' residual stream, of one shape."""
   direction(exchanges, experts[0].points, rounds)  # fail before building anything
+  if exchanges:
+    for expert in experts:
+      expert.stream_shape(input_shape)
   shapes = experts[0].point_shapes(input_shape)
   with seeded(seed):
     channels = [

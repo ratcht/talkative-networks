@@ -8,8 +8,9 @@ correlation learning trains all experts together, which a per-expert
 
 Most schemes train each expert on its own and differ only in what each expert
 sees. Those subclass IndependentScheme and say, per expert, which seed and
-which sampler to use (a Recipe). The optimiser, epoch loop and budget are
-shared, so independent schemes are directly comparable.
+which sampler to use (a Recipe). The optimiser, schedule, augmentation and
+budget are shared (recipes.py), so independent schemes are directly
+comparable.
 """
 
 from abc import ABC, abstractmethod
@@ -17,21 +18,11 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from testbed.data import Data, Sampler, Shuffle, Weighted
 from testbed.experts.architectures import Expert, build
+from testbed.experts.recipes import Budget, Trainer, augment, steps_per_epoch
 from testbed.seeds import derive, generator, seeded
-
-
-@dataclass(frozen=True)
-class Budget:
-  """How long and how hard every expert trains. Short on purpose: we want
-  sub-optimal experts (docs/docket.md)."""
-
-  epochs: int = 10
-  batch_size: int = 128
-  lr: float = 1e-3
 
 
 @dataclass
@@ -83,16 +74,29 @@ def new_expert(arch: str, data: Data, seed: int) -> Expert:
 
 def fit(arch: str, data: Data, recipe: Recipe, budget: Budget) -> Expert:
   model = new_expert(arch, data, recipe.seed)
-  optimizer = torch.optim.Adam(model.parameters(), lr=budget.lr)
+  trainer = Trainer(
+    [model],
+    budget,
+    budget.epochs * steps_per_epoch(len(recipe.sampler), budget.batch_size),
+  )
   gen = generator(derive(recipe.seed, "batches"), data.device)
+  aug = generator(derive(recipe.seed, "augment"), data.device)
   model.train()
   for _ in range(budget.epochs):
     for idx in recipe.sampler.epoch(gen).split(budget.batch_size):
-      loss = F.cross_entropy(model(data.expert.x[idx]), data.expert.y[idx])
-      optimizer.zero_grad(set_to_none=True)
-      loss.backward()
-      optimizer.step()
+      x = batch(data, idx, budget, aug)
+      with trainer.autocast(data.device):
+        logits = model(x)
+      trainer.step(trainer.loss(logits, data.expert.y[idx]))
   return model.eval()
+
+
+def batch(data: Data, idx: torch.Tensor, budget: Budget, gen: torch.Generator):
+  """The expert split's images at idx, augmented if the recipe says so, from
+  `gen`, the expert's own augmentation stream: drawing crops never shifts its
+  batch order."""
+  x = data.expert.x[idx]
+  return augment(x, data.fill, gen) if budget.augment else x
 
 
 def untrained_expert(arch: str, data: Data, pool_seed: int, i: int) -> TrainedExpert:
@@ -326,20 +330,22 @@ class NegativeCorrelation(Scheme):
     self, arch: str, data: Data, size: int, seed: int, budget: Budget
   ) -> list[TrainedExpert]:
     models = [new_expert(arch, data, derive(seed, "expert", i)) for i in range(size)]
-    optimizer = torch.optim.Adam(
-      [p for m in models for p in m.parameters()], lr=budget.lr
+    sampler = Shuffle(len(data.expert))
+    trainer = Trainer(
+      models, budget, budget.epochs * steps_per_epoch(len(sampler), budget.batch_size)
     )
     gen = generator(derive(seed, "batches"), data.device)
+    aug = generator(derive(seed, "augment"), data.device)
     for m in models:
       m.train()
     for _ in range(budget.epochs):
-      for idx in Shuffle(len(data.expert)).epoch(gen).split(budget.batch_size):
-        x, y = data.expert.x[idx], data.expert.y[idx]
-        logits = torch.stack([m(x) for m in models])  # (M, B, C)
+      for idx in sampler.epoch(gen).split(budget.batch_size):
+        x, y = batch(data, idx, budget, aug), data.expert.y[idx]
+        with trainer.autocast(data.device):
+          logits = torch.stack([m(x) for m in models]).float()  # (M, B, C)
         probs = logits.softmax(-1)
         spread = (probs - probs.mean(0)).pow(2).sum(-1).mean()
-        loss = F.cross_entropy(logits.flatten(0, 1), y.repeat(size)) - self.lam * spread
-        optimizer.zero_grad(set_to_none=True)
-        loss.backward()
-        optimizer.step()
+        trainer.step(
+          trainer.loss(logits.flatten(0, 1), y.repeat(size)) - self.lam * spread
+        )
     return [TrainedExpert(m.eval(), {"lam": self.lam}) for m in models]

@@ -7,8 +7,10 @@ the [channel ladder](../studies/channel-ladder.md). The code is in
 read and write, and which comparisons are still open, is in `docs/docket.md`.
 What the logged metrics mean is in [Metrics](metrics.md).
 
-An exchange reads every expert's features at a read point, mixes them across
-experts, and writes back into every expert at a write point. A forward
+An exchange reads every expert's residual stream at a read point, mixes it
+across experts, and writes back into every expert's stream at a write point,
+by adding an injection to it. The points are the stream after each block, and
+the channel reads and writes nowhere else ([Experts](experts.md) §1). A forward
 exchange writes later than it reads, in one pass. A backward exchange writes
 earlier than it reads, and the stages in between re-run after each write. The
 channel has three parts, and the same parts serve both directions; only the
@@ -26,10 +28,12 @@ The ensemble has $M$ experts, indexed by $i$ and $j$. (The metrics page calls a
 receiver $r$; here $r$ is the width below.) Everything is per example, so the
 example index is left out.
 
-At the read point, expert $i$'s features are a $C \times H \times W$ map. The
-encoder sees all of it, every channel at every position, as one vector
-$f_i \in \mathbb{R}^{n_{\text{read}}}$ with $n_{\text{read}} = CHW$. The write
-point holds $n_{\text{write}}$ numbers in the same way.
+At the read point, expert $i$'s features are its residual stream, $C$ channels
+at each of $P$ positions: a $C \times H \times W$ grid for a ResNet, $C \times 65$
+tokens for a ViT ([Experts](experts.md) §1). The encoder sees all of it, every
+channel at every position, as one vector $f_i \in \mathbb{R}^{n_{\text{read}}}$
+with $n_{\text{read}} = CP$. The write point holds $n_{\text{write}}$ numbers
+in the same way; in v4 it is the same stream, so $n_{\text{write}} = n_{\text{read}}$.
 
 | symbol | config field | default | meaning |
 |---|---|---|---|
@@ -174,32 +178,27 @@ part has its `linear_taper` version's weights, and the controls train a subset
 of them. With $M$ experts the channel
 is $M$ times this, against $M$ experts, so the ratios below hold for the group.
 
-On cnn3 experts (Fashion-MNIST: stage1 is $16 \times 14 \times 14 = 3136$,
-stage2 $32 \times 7 \times 7 = 1568$, stage3 $64 \times 3 \times 3 = 576$; one
-expert has 98,442 weights), at $r = 8$:
+In v4 every point is the residual stream, so $n_{\text{read}} = n_{\text{write}}$
+and every exchange of one family is the same size, wherever it reads and
+writes ([Experts](experts.md) §1). At $r = 8$:
 
-| exchange | encoder | decoder | total | × expert |
+| experts | stream | $n$ | encoder | decoder | total | × expert |
+|---|---|---:|---:|---:|---:|---:|
+| ResNet $12\times64$ (896,164) | $64 \times 16 \times 16$ | 16,384 | 131,944 | 131,592 | 263,536 | 0.29× |
+| ViT $12\times96$ (1,363,012) | $96 \times 65$ | 6,240 | 50,792 | 50,440 | 101,232 | 0.07× |
+
+Per expert; a group's channel is $M$ times this, against $M$ experts. Across
+widths, per expert:
+
+| experts | $r = 4$ | $r = 8$ | $r = 16$ | $r = 32$ |
 |---|---:|---:|---:|---:|
-| forward stage1 → stage2 | 25,960 | 13,064 | 39,024 | 0.40× |
-| forward stage2 → stage3 | 13,416 | 5,128 | 18,544 | 0.19× |
-| forward stage1 → stage3 | 25,960 | 5,128 | 31,088 | 0.32× |
-| backward stage2 → stage1 | 13,416 | 25,608 | 39,024 | 0.40× |
-| backward stage3 → stage2 | 5,480 | 13,064 | 18,544 | 0.19× |
-| backward stage3 → stage1 | 5,480 | 25,608 | 31,088 | 0.32× |
+| ResNet $12\times64$ | 0.15× | 0.29× | 0.59× | 1.18× |
+| ViT $12\times96$ | 0.04× | 0.07× | 0.15× | 0.30× |
 
-The side that touches the larger map holds most of the weights: the encoder
-when reading there, the decoder when writing there. Across widths, each row
-holding for both directions:
-
-| points | $r = 4$ | $r = 8$ | $r = 16$ | $r = 32$ | $r = 64$ |
-|---|---:|---:|---:|---:|---:|
-| stage1 and stage2 | 0.20× | 0.40× | 0.79× | 1.58× | 3.16× |
-| stage2 and stage3 | 0.09× | 0.19× | 0.38× | 0.75× | 1.50× |
-| stage1 and stage3 | 0.16× | 0.32× | 0.63× | 1.26× | 2.52× |
-
-For comparison, a dense map, with its own weight for every entry in every
-message number, would be 1.7–4.2× an expert on these exchanges. The `pooled`
-encoder with the `broadcast` decoder is 0.08–0.13×.
+On v3's cnn3 experts the same widths gave 0.19–0.40× at $r = 8$, depending on
+the points. For comparison, a dense map, with its own weight for every entry in every
+message number, would be several times an expert. The `pooled` encoder with
+the `broadcast` decoder is far smaller.
 
 ## 6. What the width limits
 
@@ -207,9 +206,9 @@ encoder with the `broadcast` decoder is 0.08–0.13×.
   numbers, and an injection is a mix of at most $r$ patterns.
 - **Pooling and broadcasting are not special cases at small $r$.** Reproducing
   the `pooled` encoder exactly takes $r \ge C$ at the read point, and a
-  broadcast injection takes $r \ge C$ at the write point: 16 at stage 1, 32 at
-  stage 2, 64 at stage 3 on cnn3. Below that the channel can only learn a
-  cut-down version of either.
+  broadcast injection takes $r \ge C$ at the write point: 64 for the ResNet
+  $12\times64$, 96 for the ViT $12\times96$. Below that the channel can only
+  learn a cut-down version of either.
 - **A ceiling.** The `linear_taper` decoder can use at most $r = d_v = 64$, since what
   it reads has $d_v$ numbers, and at that width the channel is already close
   to dense in size.

@@ -16,10 +16,10 @@ from testbed.run import check_flags, parse_args
 from testbed.train import loss_fn
 
 
-@pytest.mark.parametrize("read", [None, "stage1", "stage2", "stage3"])
+@pytest.mark.parametrize("read", [None, "block1", "block2", "block3"])
 def test_an_untrained_gate_is_bagging(read):
-  model = build_gated(random_experts(), GateConfig(read=read), (1, 28, 28), seed=0)
-  assert model.read == (read or "stage3")  # the experts' last point by default
+  model = build_gated(random_experts(), GateConfig(read=read), (3, 32, 32), seed=0)
+  assert model.read == (read or "block3")  # the experts' last point by default
   x = fake_data().joint_val.x
   with torch.no_grad():
     out = model(x)
@@ -40,7 +40,7 @@ def train_a_little(model, steps: int = 20) -> None:
 
 
 def test_only_the_gate_trains_and_it_moves_off_equal_weights():
-  model = build_gated(random_experts(), GateConfig(), (1, 28, 28), seed=0)
+  model = build_gated(random_experts(), GateConfig(), (3, 32, 32), seed=0)
   experts_before = [p.clone() for p in model.experts.parameters()]
   train_a_little(model)
   assert all(p.grad is None for p in model.experts.parameters())
@@ -56,7 +56,7 @@ def test_only_the_gate_trains_and_it_moves_off_equal_weights():
 def test_the_metrics_recompute_the_models_answer():
   """The answer metrics rebuild the ensemble's answer from the experts' logits
   and the weights; it must be the one the model gave."""
-  model = build_gated(random_experts(), GateConfig(), (1, 28, 28), seed=0)
+  model = build_gated(random_experts(), GateConfig(), (3, 32, 32), seed=0)
   train_a_little(model)
   with torch.no_grad():
     out = model(fake_data().joint_val.x)
@@ -70,8 +70,9 @@ def test_the_gates_size():
   """docs/testbed/moe.md: M readings of width r of every expert's map, then a
   score for each expert from all M r readings."""
   experts, r = random_experts(), GateConfig().width
-  for read, size in {"stage1": 3136, "stage2": 1568, "stage3": 576}.items():
-    gate = build_gated(experts, GateConfig(read=read), (1, 28, 28), seed=0).gate
+  # every point is the stream: 8 channels on a 16x16 grid
+  for read, size in {"embed": 2048, "block1": 2048, "block3": 2048}.items():
+    gate = build_gated(experts, GateConfig(read=read), (3, 32, 32), seed=0).gate
     m = len(experts)
     assert (
       sum(p.numel() for p in gate.parameters()) == m * (size + 1) * r + (m * r + 1) * m
@@ -80,7 +81,7 @@ def test_the_gates_size():
 
 def test_a_gate_reads_only_at_a_point():
   with pytest.raises(ValueError):
-    build_gated(random_experts(), GateConfig(read="head"), (1, 28, 28), seed=0)
+    build_gated(random_experts(), GateConfig(read="head"), (3, 32, 32), seed=0)
 
 
 ARGS = ["--arm", "a", "--trial-seeds", "0"]
@@ -89,9 +90,9 @@ ARGS = ["--arm", "a", "--trial-seeds", "0"]
 @pytest.mark.parametrize(
   "flags",
   [
-    ["--gate", "linear_taper_gelu", "--exchange", "stage2", "stage3"],
+    ["--gate", "linear_taper_gelu", "--exchange", "block2", "block3"],
     ["--gate", "linear_taper_gelu", "--loss", "per_expert"],
-    ["--gate-read", "stage3"],  # no gate to read for
+    ["--gate-read", "block3"],  # no gate to read for
   ],
 )
 def test_the_command_line_refuses_what_a_gate_cant_be(flags):
