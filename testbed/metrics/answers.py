@@ -62,25 +62,36 @@ def joint_answer_shift(
   post: torch.Tensor,
   y: torch.Tensor,
   weights: torch.Tensor | None = None,
+  compare_experts: bool = True,
 ) -> dict[str, float]:
   """Which of the ensemble's answers communication corrected and corrupted.
-  `weights` belong to `post`; `pre` is bagging."""
+  `weights` belong to `post`; `pre` is the model before training (bagging for
+  an ensemble). Without `compare_experts`, for a model whose answer is one
+  expert's, the kinds that compare experts with each other are left out."""
   right_pre = average(pre).argmax(-1) == y
   right_post = average(post, weights).argmax(-1) == y
   corrected, corrupted = rate(~right_pre & right_post), rate(right_pre & ~right_post)
-  return {
+  shift = {
     "pre_accuracy": rate(right_pre),
     "post_accuracy": rate(right_post),
     "corrected": corrected,
     "corrupted": corrupted,
     "net": corrected - corrupted,
-    "agreement_pre": agreement(pre),
-    "agreement_post": agreement(post),
-  } | {
-    f"top{k}_overlap_{when}": topk_overlap(logits, k)
-    for k in TOP_K
-    for when, logits in (("pre", pre), ("post", post))
   }
+  if not compare_experts:
+    return shift
+  return (
+    shift
+    | {
+      "agreement_pre": agreement(pre),
+      "agreement_post": agreement(post),
+    }
+    | {
+      f"top{k}_overlap_{when}": topk_overlap(logits, k)
+      for k in TOP_K
+      for when, logits in (("pre", pre), ("post", post))
+    }
+  )
 
 
 def marginal_answer_shift(

@@ -96,6 +96,10 @@ class GatedEnsemble(nn.Module):
     logits = torch.stack([expert(x) for expert in self.experts], dim=1)
     return Output(average(logits), logits, [])
 
+  def baseline(self, x: torch.Tensor) -> Output:
+    """The model before training, which joint training starts from: bagging."""
+    return self.bagging(x)
+
 
 def build_gated(
   experts: list[Expert], config: GateConfig, input_shape: tuple[int, ...], seed: int

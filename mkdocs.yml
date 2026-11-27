@@ -7,10 +7,12 @@ nav:
       - Experts: testbed/experts.md
       - Channel: testbed/channel.md
       - Soft-gated MoE: testbed/moe.md
+      - Grafting: testbed/grafting.md
       - Metrics: testbed/metrics.md
       - Docket: docket.md
   - Studies:
       - Channel ladder: studies/channel-ladder.md
+      - Model grafting: studies/model-grafting.md
       - QK-norm attention: studies/rmsnorm-attention.md
       - Joint vs individual loss: studies/individual-loss.md
 

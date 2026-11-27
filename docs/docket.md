@@ -1,5 +1,31 @@
 # Docket
 
+## Model grafting (2026-11-27, branch `model-grafting`)
+
+A graft (docs/testbed/grafting.md, docs/studies/model-grafting.md): the
+anchor, the group's first expert, alone sees the image and answers; the
+obligates never see it and are never read. The user's motivation: make
+communication mandatory, since in the ensembles each expert's own add-on (the
+`self` control) did as well as communicating.
+
+- **Departs from the v3 rule that every expert sees the same full input**, by
+  the user's choice: the obligates see nothing and act only through what the
+  anchor sends them. Diversity still comes from what the experts learned.
+- Decided by the user: the names Anchor and Obligate; the side branch, both
+  stitches at the same depth; one stitch into every obligate (Bansal et al.
+  2021), no gate, from random weights; the class token through both stitches;
+  CALM's attention over every position of every obligate on the return, no
+  "nobody" option, and `mean` as the other mixer; the bypass as the control,
+  untrained and clone obligates deferred; the anchor fixed by the trial seed;
+  the middle third as the default points until a pilot places them; the
+  answer metrics that compare experts are left out.
+- Claude's choices, pending: no normalisation in the ViT stitch; heads $C/32$;
+  no position embedding on the return; the mean over the same position of
+  every obligate; the testbed's joint defaults (10 epochs, Adam $10^{-3}$).
+- Open: where to read and write (pilot 2026-11-27); joint epochs and the
+  learning rate for random-start stitches; the metrics not yet logged for a
+  graft (where an anchor position attends, `qk_cos_gap`, routing).
+
 ## v4: residual-stream experts (2026-11-27)
 
 v4 is v3 with experts that keep a uniform residual stream (docs/testbed/experts.md).

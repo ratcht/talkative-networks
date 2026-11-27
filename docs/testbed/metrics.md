@@ -8,6 +8,9 @@ the MLflow UI.
 
 Most of these metrics come from the v2 testbed. §9 lists what changed.
 
+A graft (testbed/grafting.py) logs a subset of these, some with a meaning of
+their own: [Grafting](grafting.md) §6.
+
 ## 1. When metrics are measured
 
 Metrics are logged during joint training only, while the channel trains on top

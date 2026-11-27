@@ -6,11 +6,13 @@ Run one arm of a study over a list of trial seeds.
   uv run python -m testbed.run --arm forward-self --exchange block4 block8 --mixer self --trial-seeds 0 1 2
   uv run python -m testbed.run --arm backward --exchange block8 block4 --rounds 2 --trial-seeds 0 1 2
   uv run python -m testbed.run --arm moe --gate linear_taper_gelu --gate-read block12 --trial-seeds 0 1 2
+  uv run python -m testbed.run --arm graft --graft --graft-read block4 --graft-write block8 --trial-seeds 0 1 2
   uv run python -m testbed.run --arm pools --pools-only --arch vit --trial-seeds 0 1 2
 
-An arm is bagging (no exchange), a communicating ensemble (--exchange), or the
+An arm is bagging (no exchange), a communicating ensemble (--exchange), the
 soft-gated MoE baseline (--gate, testbed/moe.py), which weighs the experts'
-answers instead.
+answers instead, or a graft (--graft, testbed/grafting.py), in which the
+group's first expert, the anchor, alone sees the image and answers.
 
 This runner knows no study. A study's own runner (studies/) passes it the
 parts to use and labels the runs with --tag. Flags must be spelled out in
@@ -42,6 +44,8 @@ from testbed.communication import (
 )
 from testbed.data import DATASETS, REPO_ROOT, Data, load
 from testbed.metrics import description
+from testbed.grafting import MIXERS as GRAFT_MIXERS
+from testbed.grafting import STITCHES, GraftConfig, build_graft
 from testbed.moe import GATES, GateConfig, build_gated
 from testbed.experts import (
   ARCHITECTURES,
@@ -126,10 +130,25 @@ def check_flags(args: argparse.Namespace) -> None:
     raise SystemExit("--gate-read needs a --gate")
   if args.epsilon and args.scheme != "disjoint_subset":
     raise SystemExit(f"--epsilon belongs to disjoint_subset, not {args.scheme}")
-  if args.pools_only and (args.exchange or args.gate):
+  if args.pools_only and (args.exchange or args.gate or args.graft):
     raise SystemExit(
-      "--pools-only trains experts and nothing else; drop --exchange/--gate"
+      "--pools-only trains experts and nothing else; drop --exchange/--gate/--graft"
     )
+  if args.graft and (args.exchange or args.gate):
+    raise SystemExit("--graft is its own model; drop --exchange/--gate")
+  if args.graft and args.loss == "per_expert":
+    raise SystemExit("in a graft only the anchor answers; drop --loss per_expert")
+  graft_flags = {
+    "--graft-read": args.graft_read != GraftConfig.read,
+    "--graft-write": args.graft_write != GraftConfig.write,
+    "--graft-mixer": args.graft_mixer != GraftConfig.mixer,
+    "--graft-stitch": args.graft_stitch is not None,
+    "--graft-heads": args.graft_heads is not None,
+    "--graft-bypass": args.graft_bypass,
+  }
+  if not args.graft and any(graft_flags.values()):
+    given = ", ".join(flag for flag, set_ in graft_flags.items() if set_)
+    raise SystemExit(f"{given} need --graft")
 
 
 def code_version() -> dict[str, str]:
@@ -263,6 +282,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   comm.add_argument(
     "--gate-read", help="the point the gate reads; the experts' last point by default"
   )
+  graft = p.add_argument_group(
+    "grafting (testbed/grafting.py, docs/testbed/grafting.md)"
+  )
+  graft.add_argument(
+    "--graft",
+    action="store_true",
+    help="the group's first expert, the anchor, alone sees the image and answers; "
+    "the others, the obligates, take part through the graft's channel",
+  )
+  graft.add_argument(
+    "--graft-read",
+    default=GraftConfig.read,
+    help="the anchor's read point, where the obligates are written",
+  )
+  graft.add_argument(
+    "--graft-write",
+    default=GraftConfig.write,
+    help="the anchor's write point, where the obligates are read",
+  )
+  graft.add_argument("--graft-mixer", choices=GRAFT_MIXERS, default=GraftConfig.mixer)
+  graft.add_argument(
+    "--graft-stitch",
+    choices=STITCHES,
+    help="the outbound stitch; by default the experts' family's own",
+  )
+  graft.add_argument(
+    "--graft-heads", type=int, help="attention heads; one per 32 channels by default"
+  )
+  graft.add_argument(
+    "--graft-bypass",
+    action="store_true",
+    help="the control: leave out the obligates' blocks between the two points",
+  )
 
   joint = p.add_argument_group("joint training")
   joint.add_argument("--epochs", type=int, default=10)
@@ -316,6 +368,18 @@ def main(
     args.selector or ("first" if pool_size == args.experts else "random")
   ]()
   joint = JointConfig(args.epochs, args.batch_size, args.lr, args.loss)
+  grafting = (
+    GraftConfig(
+      read=args.graft_read,
+      write=args.graft_write,
+      mixer=args.graft_mixer,
+      stitch=args.graft_stitch,
+      heads=args.graft_heads,
+      bypass=args.graft_bypass,
+    )
+    if args.graft
+    else None
+  )
 
   accuracies, gains = [], []
   for trial_seed in args.trial_seeds:
@@ -333,6 +397,13 @@ def main(
     if gate:
       model = build_gated(
         [e.model for e in experts], gate, data.input_shape, derive(trial_seed, "gate")
+      )
+    elif grafting:
+      model = build_graft(
+        [e.model for e in experts],
+        grafting,
+        data.input_shape,
+        derive(trial_seed, "graft"),
       )
     else:
       model = build_ensemble(
@@ -358,6 +429,11 @@ def main(
         tags
         | {"arm": args.arm, "trial_seed": trial_seed, "direction": model.direction}
         | ({"gate": gate.architecture} if gate else {})
+        | (
+          {"graft": model.config.mixer, "bypass": str(model.config.bypass).lower()}
+          if grafting
+          else {}
+        )
       )
       tracker.log_params(
         {
@@ -383,6 +459,7 @@ def main(
           "rounds": args.rounds,
           **({"channel": asdict(channel)} if exchanges else {}),
           **({"gate": asdict(gate) | {"read": model.read}} if gate else {}),
+          **({"graft": asdict(model.config)} if grafting else {}),
           "joint": asdict(joint),
           **{f"expert{i}": e.profile for i, e in enumerate(experts) if e.profile},
         }
@@ -396,15 +473,16 @@ def main(
     gain = median_around_best(history, "test/joint_answer_shift/net")
     accuracies.append(accuracy)
     gains.append(gain)
+    start = "anchor alone" if grafting else "bagging"
     print(
-      f"[{args.arm}] trial seed {trial_seed}: pool {pool.key}  bagging {history[0]['test/accuracy']:.4f}"
-      f"  ensemble {accuracy:.4f}  gain {gain:+.4f}  epochs {epochs.start}-{epochs.stop - 1}"
+      f"[{args.arm}] trial seed {trial_seed}: pool {pool.key}  {start} {history[0]['test/accuracy']:.4f}"
+      f"  trained {accuracy:.4f}  gain {gain:+.4f}  epochs {epochs.start}-{epochs.stop - 1}"
     )
   if args.pools_only:
     return
   print(
-    f"[{args.arm}] mean over {len(gains)} trial seeds: ensemble {mean(accuracies):.4f}"
-    f"  gain over bagging {mean(gains):+.4f}"
+    f"[{args.arm}] mean over {len(gains)} trial seeds: trained {mean(accuracies):.4f}"
+    f"  gain over the start {mean(gains):+.4f}"
   )
 
 

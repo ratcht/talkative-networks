@@ -81,7 +81,7 @@ def train(
   step 0 first."""
   # the experts are frozen, so their answers without communication are fixed
   pre = {
-    split: predict(model.bagging, getattr(data, split).x)[0]
+    split: predict(model.baseline, getattr(data, split).x)[0]
     for split in ("joint", "joint_val", "test")
   }
   routes: dict[str, torch.Tensor | None] = {}  # for route_flip_rate
@@ -116,15 +116,17 @@ def train(
         weights.append(out.weights.detach())
     post, y = torch.cat(logits), data.joint.y[order]
     w = torch.cat(weights) if weights else None
+    ensemble = getattr(model, "ensemble_answers", True)
     joint_metrics = prefix(
       "joint",
       {
         "loss": loss_fn(post, y, config.loss, w).item(),
         "accuracy": accuracy(post, y, w),
       }
-      | prefix("answer_grid", answer_grid(post, y, w))
+      | (prefix("answer_grid", answer_grid(post, y, w)) if ensemble else {})
       | prefix(
-        "joint_answer_shift", joint_answer_shift(pre["joint"][order], post, y, w)
+        "joint_answer_shift",
+        joint_answer_shift(pre["joint"][order], post, y, w, compare_experts=ensemble),
       ),
     )
     log(
@@ -145,6 +147,9 @@ def evaluate(
   """A full pass of joint_val, with every exchange's metrics, then of test.
   `routes` holds each exchange's routing from the previous call and is updated."""
   model.eval()
+  # False for a model whose answer is one expert's (a graft): the metrics that
+  # compare experts' answers with each other don't apply
+  ensemble = getattr(model, "ensemble_answers", True)
   out = {}
   for split in ("joint_val", "test"):
     x, y = getattr(data, split).x, getattr(data, split).y
@@ -154,17 +159,21 @@ def evaluate(
     metrics = {
       "loss": loss_fn(post, y, loss, weights).item(),
       "accuracy": accuracy(post, y, weights),
-      "expert_accuracy": expert_accuracy(post, y),
     }
-    metrics |= prefix("expert_accuracy", each_expert_accuracy(post, y))
-    metrics |= prefix("answer_grid", answer_grid(post, y, weights))
+    if ensemble:  # metrics that compare the experts' own answers
+      metrics["expert_accuracy"] = expert_accuracy(post, y)
+      metrics |= prefix("expert_accuracy", each_expert_accuracy(post, y))
+      metrics |= prefix("answer_grid", answer_grid(post, y, weights))
     metrics |= prefix(
-      "joint_answer_shift", joint_answer_shift(pre[split], post, y, weights)
+      "joint_answer_shift",
+      joint_answer_shift(pre[split], post, y, weights, compare_experts=ensemble),
     )
     if split == "joint_val":
-      metrics |= prefix(
-        "marginal_answer_shift", marginal_answer_shift(pre[split], post, y)
-      ) | {"answer_shift_kl": answer_shift_kl(pre[split], post)}
+      if ensemble:
+        metrics |= prefix(
+          "marginal_answer_shift", marginal_answer_shift(pre[split], post, y)
+        )
+      metrics["answer_shift_kl"] = answer_shift_kl(pre[split], post)
     out |= prefix(split, metrics)
     for site, meter in meters.items():
       exchange_metrics, routes[site] = meter.result(
@@ -192,7 +201,9 @@ def predict(
       weights.append(out.weights)
     if measure:
       for trace in out.traces:
-        meters.setdefault(trace.site, ExchangeMeter()).add(trace)
+        # a trace may bring its own meter (a graft's); otherwise an exchange's
+        make = getattr(trace, "new_meter", ExchangeMeter)
+        meters.setdefault(trace.site, make()).add(trace)
   return torch.cat(logits), torch.cat(weights) if weights else None, meters
 
 

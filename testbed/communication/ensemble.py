@@ -157,6 +157,10 @@ class CommunicatingEnsemble(nn.Module):
     logits = torch.stack([expert(x) for expert in self.experts], dim=1)
     return Output(average(logits), logits, [])
 
+  def baseline(self, x: torch.Tensor) -> Output:
+    """The model before training, which joint training starts from: bagging."""
+    return self.bagging(x)
+
   def _forward(self, x: torch.Tensor) -> tuple[torch.Tensor, list[Trace]]:
     """One pass down the stages; each exchange reads on the way and writes further down."""
     features = [x] * len(self.experts)
