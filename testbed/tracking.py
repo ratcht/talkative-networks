@@ -18,6 +18,8 @@ To log to a local file instead (offline work), and browse it:
 
   export MLFLOW_TRACKING_URI=sqlite:///mlflow.db                # from the repo root
   uv run mlflow ui --backend-store-uri sqlite:///mlflow.db      # port 5000
+
+Runs made into a local file on another machine come in through testbed/merge_runs.py.
 """
 
 import os

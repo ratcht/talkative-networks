@@ -74,8 +74,8 @@ questions: whether weighing the experts is enough, and whether fixing each one
 is.
 
 Because no expert's answer changes, these metrics stay at their step-0 values
-throughout a run: `expert_accuracy`, the agreement in `joint_answer_shift`
-(`agreement_post` equals `agreement_pre`), `marginal_answer_shift` (0) and
+throughout a run: `expert_accuracy`, the agreement and top-k overlap in
+`joint_answer_shift` (each `_post` equals its `_pre`), `marginal_answer_shift` (0) and
 `answer_shift_kl` (0). The exchange metrics are absent, since nothing is
 exchanged. `grad_norm` and `update_ratio` report the gate as `gate.read` and
 `gate.score`.

@@ -5,6 +5,7 @@ run in seconds with no downloads, GPU or MLflow.
   uv run pytest tests
 """
 
+import copy
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ from fakes import fake_data, random_experts
 
 from testbed.communication import ChannelConfig, Exchange, Message, build_ensemble
 from testbed.communication.channel import (
+  MIXERS,
   LinearTaperDecoder,
   LinearTaperEncoder,
   LinearTaperGELUDecoder,
@@ -27,13 +29,25 @@ from testbed.data import Weighted
 from testbed.experts import (
   Budget,
   ClassSkew,
+  DataShard,
+  DisjointSubset,
   NegativeCorrelation,
   Redundant,
   SeedOnly,
+  Untrained,
   get_pool,
 )
-from testbed.run import extra_tags, parse_args
+from testbed.experts.pool import weights_digest
+from testbed.run import (
+  check_flags,
+  code_version,
+  extra_tags,
+  group_experts,
+  make_scheme,
+  parse_args,
+)
 from testbed.seeds import derive, generator
+from testbed.selection import ClonesOfFirst
 from testbed.train import loss_fn
 
 
@@ -61,6 +75,95 @@ def test_redundant_copies_share_a_mix_but_not_a_seed():
   assert recipes[0].seed != recipes[1].seed
 
 
+def owner(scheme, data, size=3, seed=0) -> torch.Tensor:
+  """Which expert's part each of the expert split's examples is in."""
+  labels = data.expert.y.numpy()
+  return torch.as_tensor(scheme.parts(labels, data.num_classes, size, seed)[0])
+
+
+def test_disjoint_subsets_split_the_classes_once_per_pool():
+  data = fake_data()
+  split = [r.profile["classes"] for r in DisjointSubset().recipes(data, 3, seed=0)]
+  assert [len(s) for s in split] == [4, 3, 3]
+  assert sorted(c for s in split for c in s) == list(range(data.num_classes))
+  again = [r.profile["classes"] for r in DisjointSubset().recipes(data, 3, seed=0)]
+  assert again == split
+  others = [
+    [r.profile["classes"] for r in DisjointSubset().recipes(data, 3, seed=s)]
+    for s in range(1, 4)
+  ]
+  assert any(other != split for other in others)
+  parts = owner(DisjointSubset(), data)
+  for i, classes in enumerate(split):
+    assert torch.equal(parts == i, torch.isin(data.expert.y, torch.tensor(classes)))
+
+
+def test_data_shards_cut_every_class_in_the_subsets_shares():
+  data = fake_data(n=2000)
+  y, parts = data.expert.y, owner(DataShard(), data)
+  for c in range(data.num_classes):
+    in_class = y == c
+    for i, share in enumerate((0.4, 0.3, 0.3)):
+      count = ((parts == i) & in_class).sum().item()
+      assert abs(count - share * in_class.sum().item()) <= 1
+  assert not torch.equal(parts, owner(DataShard(), data, seed=1))
+
+
+@pytest.mark.parametrize(
+  "scheme, epsilon",
+  [(DisjointSubset(0.0), 0.0), (DisjointSubset(0.25), 0.25), (DataShard(), 0.0)],
+)
+def test_epsilon_is_the_share_of_draws_outside_an_experts_part(scheme, epsilon):
+  data = fake_data()
+  parts = owner(scheme, data)
+  for i, recipe in enumerate(scheme.recipes(data, 3, seed=0)):
+    weights, own = recipe.sampler.weights, parts == i
+    assert (weights[~own].sum() / weights.sum()).item() == pytest.approx(epsilon)
+    assert torch.unique(weights[own]).numel() == 1  # uniform inside the part
+    assert torch.unique(weights[~own]).numel() == 1  # and outside it
+    assert recipe.sampler.draws == len(data.expert)
+
+
+def test_disjoint_parts_start_from_seed_only_weights_and_check_their_settings():
+  data = fake_data()
+  seeds = [r.seed for r in SeedOnly().recipes(data, 3, seed=5)]
+  for scheme in (DisjointSubset(0.1), DataShard()):
+    assert [r.seed for r in scheme.recipes(data, 3, seed=5)] == seeds
+    with pytest.raises(ValueError):
+      scheme.recipes(data, data.num_classes + 1, seed=5)
+  for epsilon in (-0.1, 1.0):
+    with pytest.raises(ValueError):
+      DisjointSubset(epsilon)
+
+
+def test_disjoint_subsets_from_the_command_line():
+  """A pool's cache key hashes the config as JSON, where 0 and 0.0 differ."""
+  run = ["--arm", "a", "--trial-seeds", "0"]
+  args = parse_args([*run, "--scheme", "disjoint_subset", "--epsilon", "0"])
+  assert make_scheme(args).config() == {"name": "disjoint_subset", "epsilon": 0.0}
+  assert isinstance(make_scheme(args).config()["epsilon"], float)
+  default = parse_args([*run, "--scheme", "disjoint_subset"])
+  assert make_scheme(default).config() == DisjointSubset(0).config()
+  shard = parse_args([*run, "--scheme", "data_shard"])
+  assert make_scheme(shard).config() == {"name": "data_shard"}
+  check_flags(shard)
+  with pytest.raises(SystemExit):  # the shard control has no epsilon
+    check_flags(parse_args([*run, "--scheme", "data_shard", "--epsilon", "0.1"]))
+  copies = parse_args([*run, "--scheme", "disjoint_subset", "--copies", "2"])
+  recipes = make_scheme(copies).recipes(fake_data(), 4, seed=0)
+  assert recipes[0].profile["classes"] == recipes[1].profile["classes"]
+  assert recipes[0].profile["classes"] != recipes[2].profile["classes"]
+
+
+@pytest.mark.parametrize("scheme", [DisjointSubset(0.1), DataShard()])
+def test_disjoint_parts_train_and_reload_from_the_cache(scheme, tmp_path):
+  data, budget = fake_data(), Budget(1, 50)
+  first = get_pool(scheme, "cnn3", data, 3, seed=0, budget=budget, root=tmp_path)
+  again = get_pool(scheme, "cnn3", data, 3, seed=0, budget=budget, root=tmp_path)
+  assert first.digest == again.digest
+  assert [e.profile for e in again.experts] == [e.profile for e in first.experts]
+
+
 GELU = ChannelConfig("linear_taper_gelu", decoder="linear_taper_gelu")
 
 
@@ -75,6 +178,8 @@ GELU = ChannelConfig("linear_taper_gelu", decoder="linear_taper_gelu")
     ([Exchange("stage3", "stage2")], 2, GELU),
     ([Exchange("stage2", "stage3")], 1, ChannelConfig(mixer="self")),
     ([Exchange("stage3", "stage2")], 2, ChannelConfig(mixer="mean")),
+    ([Exchange("stage2", "stage3")], 1, ChannelConfig(mixer="rmsnorm_attention")),
+    ([Exchange("stage3", "stage1")], 2, ChannelConfig(mixer="rmsnorm_attention")),
     ([Exchange("stage1", "stage2")], 1, ChannelConfig("pooled", decoder="broadcast")),
     ([Exchange("stage1", "stage3")], 1, ChannelConfig("spatial", decoder="spatial")),
     ([Exchange("stage2", "stage1")], 1, ChannelConfig("pooled", decoder="broadcast")),
@@ -140,6 +245,11 @@ def test_channel_size_matches_the_docs():
 ARGS = ["--arm", "a", "--trial-seeds", "0"]
 
 
+def test_runs_record_the_code_they_ran_from():
+  version = code_version()
+  assert len(version["git_commit"]) == 40 and version["git_dirty"] in ("true", "false")
+
+
 def test_the_command_line_takes_tags_and_full_flag_names_only():
   args = parse_args([*ARGS, "--tag", "study=s", "--tag", "level=3", "--tag", "x=a=b"])
   assert extra_tags(args) == {"study": "s", "level": "3", "x": "a=b"}
@@ -170,6 +280,65 @@ def test_the_controls_hear_what_they_promise(mixer):
   for encoder in channel.encoders:
     assert encoder.query.weight.grad is None and encoder.key.weight.grad is None
     assert encoder.value.weight.grad.abs().sum() > 0
+
+
+def mix(mixer, query, key, value=None):
+  value = torch.randn(*query.shape[:-1], 64) if value is None else value
+  return MIXERS[mixer](ChannelConfig())(query, key, value)
+
+
+def test_rmsnorm_attention_ignores_the_size_of_each_query_and_key():
+  """Stretching every query and key by its own factor moves attention's
+  weights and leaves rmsnorm_attention's where they are."""
+  torch.manual_seed(0)
+  q, k = torch.randn(2, 4, 3, 1, 16)
+  stretch_q, stretch_k = 0.1 + 20 * torch.rand(2, 4, 3, 1, 1)
+  longer = q * stretch_q, k * stretch_k
+  assert torch.allclose(
+    mix("rmsnorm_attention", q, k)[1], mix("rmsnorm_attention", *longer)[1], atol=1e-6
+  )
+  assert not torch.allclose(mix("attention", q, k)[1], mix("attention", *longer)[1])
+
+
+def test_rmsnorm_attention_is_attention_at_the_length_it_rescales_to():
+  torch.manual_seed(0)
+  q, k = torch.randn(2, 4, 3, 1, 16)
+  q, k = (x / x.norm(dim=-1, keepdim=True) * 16**0.5 for x in (q, k))
+  v = torch.randn(4, 3, 1, 64)
+  for got, want in zip(mix("rmsnorm_attention", q, k, v), mix("attention", q, k, v)):
+    assert torch.allclose(got, want, atol=1e-5)
+
+
+def test_rmsnorm_attention_can_still_settle_on_one_sender():
+  """docs/testbed/channel.md §8: with a key_dim of 16 and 3 experts, a receiver's
+  largest weight can reach e^8 / (e^8 + 2), which is about 0.9993, and the
+  lowest entropy is about 0.006. So routing as sharp as a fixed wire stays
+  possible, and softness isn't forced by construction."""
+  u = torch.zeros(16)
+  u[0] = 1
+  q = u.expand(1, 3, 1, 16)
+  k = torch.stack([u, -u, -u])[None, :, None]
+  (weights,) = mix("rmsnorm_attention", q, k)[1:]
+  top = weights[0, 0, 0, 0, 0].item()
+  assert top == pytest.approx(math.exp(8) / (math.exp(8) + 2), abs=1e-6)
+  assert top > 0.999
+  rest = (1 - top) / 2
+  entropy = -top * math.log(top) - 2 * rest * math.log(rest)
+  assert entropy == pytest.approx(0.006, abs=1e-3)
+
+
+def test_rmsnorm_attention_starts_from_attentions_weights():
+  """It has no weights of its own, so on the same seed both channels start
+  identical, and a difference between the two arms is the normalising."""
+  channels = {}
+  for mixer in ("attention", "rmsnorm_attention"):
+    torch.manual_seed(0)
+    channels[mixer] = build_channel(
+      ChannelConfig(mixer=mixer), (32, 7, 7), (64, 3, 3), num_experts=3
+    ).state_dict()
+  plain, normed = channels.values()
+  assert plain.keys() == normed.keys()
+  assert all(torch.equal(plain[name], normed[name]) for name in plain)
 
 
 def test_rmsnorm_attention_ignores_the_scale_of_query_and_key():
@@ -263,6 +432,93 @@ def test_negative_correlation_trains_a_pool_jointly():
   assert not torch.equal(
     pool[0].model.stages["head"][-1].weight, pool[1].model.stages["head"][-1].weight
   )
+
+
+def test_untrained_experts_are_the_weights_other_schemes_start_from(tmp_path):
+  data = fake_data()
+  untrained = get_pool(
+    Untrained(), "cnn3", data, 3, seed=0, budget=Budget(1, 50), root=tmp_path
+  )
+  no_training = get_pool(
+    SeedOnly(), "cnn3", data, 3, seed=0, budget=Budget(0, 50), root=tmp_path
+  )
+  trained = get_pool(
+    SeedOnly(), "cnn3", data, 3, seed=0, budget=Budget(1, 50), root=tmp_path
+  )
+  assert untrained.digest == no_training.digest != trained.digest
+  assert not any(e.model.training for e in untrained.experts)
+
+
+def test_a_group_can_hold_one_expert_more_than_once(tmp_path):
+  data, budget = fake_data(), Budget(1, 50)
+  pool = get_pool(SeedOnly(), "cnn3", data, 3, seed=0, budget=budget, root=tmp_path)
+  group = ClonesOfFirst().select(pool, 3, seed=0)
+  assert group == [0, 0, 0]
+  experts = group_experts(pool, group, 0, "cnn3", data, pool_seed=0)
+  assert len({id(e.model) for e in [*experts, pool.experts[0]]}) == 4  # all its own
+  assert weights_digest(experts) == weights_digest([pool.experts[0]] * 3)
+
+
+def test_untrained_members_replace_only_the_end_of_the_group(tmp_path):
+  data, budget = fake_data(), Budget(1, 50)
+  pool = get_pool(SeedOnly(), "cnn3", data, 3, seed=0, budget=budget, root=tmp_path)
+  before = get_pool(Untrained(), "cnn3", data, 3, seed=0, budget=budget, root=tmp_path)
+  experts = group_experts(pool, [0, 1, 2], 1, "cnn3", data, pool_seed=0)
+  assert weights_digest(experts[:2]) == weights_digest(pool.experts[:2])
+  assert weights_digest(experts[2:]) == weights_digest(before.experts[2:])
+  assert experts[2].profile == {"untrained": True}
+  assert weights_digest(pool.experts) == pool.digest  # the pool itself is untouched
+
+
+@pytest.mark.parametrize("members", [-1, 3])
+def test_a_group_keeps_a_trained_expert(members):
+  args = parse_args([*ARGS, "--untrained-members", str(members)])
+  with pytest.raises(SystemExit):
+    check_flags(args)
+
+
+@pytest.mark.parametrize(
+  "exchanges, rounds",
+  [([Exchange("stage2", "stage3")], 1), ([Exchange("stage3", "stage1")], 1)],
+)
+def test_clones_with_identical_channels_have_nothing_to_say(exchanges, rounds):
+  """With identical experts and identical encoders and decoders, every expert
+  sends the same message, so every mixer delivers it unchanged. All the
+  mixers then train to the same answers, and the experts stay identical. Any
+  difference between mixers on clones comes from the channels' initialisation."""
+  data = fake_data()
+  (expert,) = random_experts(1)
+  x, y = data.joint.x[:64], data.joint.y[:64]
+  answers = {}
+  for mixer in ("self", "mean", "attention", "rmsnorm_attention"):
+    model = build_ensemble(
+      [copy.deepcopy(expert) for _ in range(3)],
+      exchanges,
+      ChannelConfig(mixer=mixer),
+      (1, 28, 28),
+      rounds,
+      seed=0,
+    )
+    (channel,) = model.channels
+    for parts in (channel.encoders, channel.decoders):
+      for part in parts[1:]:
+        part.load_state_dict(parts[0].state_dict())
+    optimizer = torch.optim.Adam(model.channels.parameters(), lr=1e-3)
+    model.train()
+    for _ in range(3):
+      loss = loss_fn(model(x).logits, y, "ensemble")
+      optimizer.zero_grad()
+      loss.backward()
+      optimizer.step()
+    model.eval()
+    with torch.no_grad():
+      answers[mixer] = model(x).logits
+      assert not torch.allclose(answers[mixer], model.bagging(x).logits, atol=1e-3)
+  first = answers["self"]
+  assert torch.allclose(first[:, 0], first[:, 2], atol=1e-4)
+  assert torch.allclose(first, answers["mean"], atol=1e-4)
+  assert torch.allclose(first, answers["attention"], atol=1e-4)
+  assert torch.allclose(first, answers["rmsnorm_attention"], atol=1e-4)
 
 
 def test_pool_cache_returns_the_same_experts(tmp_path):

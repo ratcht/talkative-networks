@@ -9,6 +9,7 @@ the registry and documented.
 
 import math
 import re
+from itertools import product
 
 import pytest
 import torch
@@ -21,15 +22,20 @@ from testbed.metrics import (
   METRICS,
   accuracy,
   answer_grid,
+  each_expert_accuracy,
+  expert_accuracy,
   joint_answer_shift,
   marginal_answer_shift,
 )
-from testbed.metrics.answers import answer_shift_kl
+from testbed.metrics.answers import TOP_K, agreement, answer_shift_kl, topk_overlap
 from testbed.metrics.exchanges import (
   InjectionSums,
+  attention,
   cos_gap,
   participation_ratio,
   routing,
+  sent_statistics,
+  spread,
 )
 from testbed.metrics.optimisation import OptimisationMeter, component
 from testbed.metrics.registry import find
@@ -75,6 +81,18 @@ def test_answer_grid_by_construction():
       "none_right_avg_wrong": 0.2,
     }
   )
+
+
+def test_each_expert_accuracy_by_construction():
+  # three experts, two classes, the true class is 0 on all four examples
+  answers = torch.tensor(
+    [[0, 0, 1], [0, 0, 1], [0, 1, 1], [0, 1, 0]]  # right 4, 2 and 1 times of 4
+  )
+  post = torch.nn.functional.one_hot(answers, 2).float()
+  y = torch.zeros(4, dtype=torch.long)
+  each = each_expert_accuracy(post, y)
+  assert each == {"expert0": 1.0, "expert1": 0.5, "expert2": 0.25}
+  assert sum(each.values()) / 3 == pytest.approx(expert_accuracy(post, y))
 
 
 def test_answer_grid_adds_up():
@@ -128,8 +146,36 @@ def test_no_communication_shifts_nothing():
   shift = joint_answer_shift(pre, pre, y)
   assert shift["corrected"] == shift["corrupted"] == shift["net"] == 0
   assert shift["agreement_pre"] == shift["agreement_post"]
+  for k in TOP_K:
+    assert shift[f"top{k}_overlap_pre"] == shift[f"top{k}_overlap_post"]
   assert all(v == 0 for v in marginal_answer_shift(pre, pre, y).values())
   assert answer_shift_kl(pre, pre) == pytest.approx(0, abs=1e-7)
+
+
+def test_topk_overlap_by_construction():
+  """Three experts over five classes, shortlists listed most likely first:
+  expert 0 (0, 1, 2), expert 1 (1, 0, 3), expert 2 (4, 3, 2)."""
+  ranks = torch.tensor([[0, 1, 2], [1, 0, 3], [4, 3, 2]])
+  logits = torch.full((1, 3, 5), -10.0)
+  for i, classes in enumerate(ranks):
+    logits[0, i, classes] = torch.tensor([3.0, 2.0, 1.0])
+  # top 2: {0,1} {0,1} {4,3} share 2, 0 and 0 of 2 classes
+  assert topk_overlap(logits, 2) == pytest.approx((1 + 0 + 0) / 3)
+  # top 3: {0,1,2} {0,1,3} {2,3,4} share 2, 1 and 1 of 3 classes
+  assert topk_overlap(logits, 3) == pytest.approx((2 / 3 + 1 / 3 + 1 / 3) / 3)
+  # order within a shortlist doesn't count: experts 0 and 1 disagree on the
+  # answer but share their whole top 2
+  assert agreement(logits[:, :2]) == 0
+  assert topk_overlap(logits[:, :2], 2) == 1
+
+
+def test_topk_overlap_bounds():
+  pre, _ = logits(seed=0)
+  for k in TOP_K:
+    assert 0 <= topk_overlap(pre, k) <= 1
+  assert topk_overlap(pre, 1) == pytest.approx(agreement(pre))
+  same = pre[:, :1].expand(-1, 3, -1)  # three copies of one expert
+  assert topk_overlap(same, 3) == 1
 
 
 def test_one_expert_changing_is_its_own_marginal():
@@ -232,6 +278,46 @@ def test_routing_by_construction():
   )
 
 
+def test_who_each_receiver_hears_by_construction():
+  # half the examples, receiver 0 hears sender 1 alone; the other half, sender 2
+  weights = torch.zeros(4, 3, 3)
+  weights[:2, 0, 1] = 1
+  weights[2:, 0, 2] = 1
+  weights[:, 1] = torch.tensor([0.2, 0.3, 0.5])  # receiver 1 splits its attention
+  weights[:, 2, 2] = 1  # receiver 2 keeps to itself
+  out = attention(weights)
+  assert out["attn_heard/expert0/from0"] == 0
+  assert out["attn_heard/expert0/from1"] == out["attn_heard/expert0/from2"] == 0.5
+  assert out["attn_heard/expert1/from1"] == pytest.approx(0.3)
+  assert out["attn_heard/expert2/from2"] == 1
+  for r in range(3):
+    assert sum(out[f"attn_heard/expert{r}/from{s}"] for s in range(3)) == pytest.approx(
+      1
+    )
+
+
+def test_the_size_of_what_is_sent_by_construction():
+  queries, keys = torch.zeros(2, 5, 3, 1, 4)
+  for i in range(3):
+    queries[:, i, :, 0] = i + 1.0  # lengths 1, 2, 3
+    keys[:, i, :, :] = 1.0  # length 2 for every expert
+  out = sent_statistics({"query": queries, "key": keys})
+  assert [out[f"msg_norm/query/expert{i}"] for i in range(3)] == [1, 2, 3]
+  assert out["msg_norm/query"] == 2
+  assert out["msg_norm/key"] == out["msg_norm/key/expert2"] == 2
+  assert out["msg_spread/query"] == 0  # the same message on every image
+
+
+def test_spread_by_construction():
+  row = torch.tensor([3.0, 4.0])
+  assert spread(row.expand(10, 2)) == 0  # the same for every image
+  assert spread(torch.zeros(10, 2)) == 0
+  flips = torch.stack([row, -row])  # nothing shared at all
+  assert spread(flips) == pytest.approx(1)
+  half = torch.tensor([[1.0, 1.0], [1.0, -1.0]])  # shared (1, 0), varying (0, ±1)
+  assert spread(half) == pytest.approx(0.5**0.5)
+
+
 def test_gradient_norms_split_the_total():
   model = build_ensemble(
     random_experts(), [Exchange("stage1", "stage2")], ChannelConfig(), (1, 28, 28), 1, 0
@@ -255,6 +341,12 @@ def test_gradient_norms_split_the_total():
   assert out["update_ratio/total"] == pytest.approx(
     0.01 * len(before) ** 0.5 / before.norm().item()
   )
+  after = torch.cat([p.detach().flatten() for p in params]).double()
+  sizes = [
+    v for k, v in out.items() if k.startswith("weight_norm/") and "total" not in k
+  ]
+  assert out["weight_norm/total"] == pytest.approx(after.norm().item())
+  assert out["weight_norm/total"] ** 2 == pytest.approx(sum(v**2 for v in sizes))
 
 
 def test_a_part_that_starts_at_zero_is_measured_from_its_first_move():
@@ -301,6 +393,11 @@ class Recorder:
 ARMS = {
   "forward": ([Exchange("stage1", "stage2")], 1, ChannelConfig()),
   "forward_self": ([Exchange("stage1", "stage2")], 1, ChannelConfig(mixer="self")),
+  "forward_rmsnorm": (
+    [Exchange("stage1", "stage2")],
+    1,
+    ChannelConfig(mixer="rmsnorm_attention"),
+  ),
   "forward_broadcast": (
     [Exchange("stage1", "stage3")],
     1,
@@ -418,6 +515,7 @@ def test_each_exchange_is_measured_where_it_ran(run):
   expected = {
     "forward": {"ex0"},
     "forward_self": {"ex0"},
+    "forward_rmsnorm": {"ex0"},
     "forward_broadcast": {"ex0"},
     "forward_spatial": {"ex0"},
     "backward": {"ex0/round0", "ex0/round1"},
@@ -430,11 +528,54 @@ def test_each_exchange_is_measured_where_it_ran(run):
     assert last[f"msg_norm/injection/{site}"] > 0  # the channel learned to write
     # the self control has no mixing weights, so no routing to read
     assert (f"route_flip_rate/{site}" in last) == (arm != "forward_self")
+    assert (f"attn_heard/expert0/from0/{site}" in last) == (arm != "forward_self")
+    # every encoder makes a query and key, whether or not a mixer reads them;
+    # only those with a shared set of readings have readings to measure
+    assert f"msg_norm/query/expert2/{site}" in last
+    assert f"msg_spread/key/{site}" in last
+    has_readings = arm in (
+      "forward",
+      "forward_self",
+      "forward_rmsnorm",
+      "backward",
+    )
+    assert (f"msg_norm/reading/{site}" in last) == has_readings
     if arm == "forward_broadcast":  # one value per channel, the same at every position
       assert last[f"inj_resid_frac/{site}"] < 1e-12
       assert last[f"inj_rank/{site}"] == 0
     else:
       assert last[f"inj_resid_frac/{site}"] > 0
+
+
+def test_heads_the_self_control_never_reads_keep_their_weights(run):
+  """Under self no gradient reaches the query and key heads, so any growth in
+  what they send comes from the readings below them."""
+  arm, _, _, _, history = run
+  if arm != "forward_self":
+    return
+  for step in history[1:]:
+    assert (
+      step["weight_norm/encoder.query/ex0"]
+      == history[1]["weight_norm/encoder.query/ex0"]
+    )
+    assert (
+      step["weight_norm/encoder.key/ex0"] == history[1]["weight_norm/encoder.key/ex0"]
+    )
+  assert (
+    history[-1]["weight_norm/encoder.read/ex0"]
+    != history[1]["weight_norm/encoder.read/ex0"]
+  )
+
+
+def test_sizes_are_what_the_encoders_sent_not_what_the_mixer_rescaled(run):
+  """rmsnorm_attention rescales every query and key to length 4 at the default
+  key_dim, so a reading of 4 would mean the metric sat behind the mixer."""
+  arm, _, _, _, history = run
+  if arm != "forward_rmsnorm":
+    return
+  for step in history:
+    assert step["msg_norm/query/ex0"] != pytest.approx(4, abs=1e-3)
+    assert step["msg_norm/key/ex0"] != pytest.approx(4, abs=1e-3)
 
 
 def test_linear_taper_parts_send_and_write_at_most_width_directions(run):
@@ -466,6 +607,31 @@ def test_attention_stays_in_bounds(run):
         assert -1e-9 <= value <= math.log(m) + 1e-6, key
       if key.startswith("attn_top1/"):  # 1/M for all equally, 1 for one sender
         assert 1 / m - 1e-6 <= value <= 1 + 1e-6, key
+      if key.startswith("attn_heard/expert"):
+        assert -1e-9 <= value <= 1 + 1e-6, key
+      if key.startswith("qk_cos_gap/"):  # 0 for no preference by direction
+        assert -1e-6 <= value <= 2 + 1e-6, key
+    sites = {k.split("/", 3)[3] for k in step if k.startswith("attn_heard/")}
+    for site, r in product(sites, range(m)):  # each receiver's shares sum to 1
+      shares = [step[f"attn_heard/expert{r}/from{s}/{site}"] for s in range(m)]
+      assert sum(shares) == pytest.approx(1)
+
+
+def test_qk_cos_gap_is_logged_for_every_mixer_that_weighs_its_senders(run):
+  """Any mixer that returns weights gets it, whatever it does to the queries
+  and keys first, and the controls, which never read them, don't."""
+  arm, model, _, _, history = run
+  weighs = {
+    "forward": True,
+    "forward_rmsnorm": True,
+    "backward": True,
+    "forward_self": False,
+  }
+  for step in history:
+    gaps = {k.partition("/")[2] for k in step if k.startswith("qk_cos_gap/")}
+    assert gaps == {k.partition("/")[2] for k in step if k.startswith("attn_entropy/")}
+    if arm in weighs:
+      assert bool(gaps) == weighs[arm]
 
 
 def test_the_moe_reweighs_answers_and_changes_no_expert(run):
@@ -480,6 +646,10 @@ def test_the_moe_reweighs_answers_and_changes_no_expert(run):
     assert last[f"{split}/expert_accuracy"] == first[f"{split}/expert_accuracy"]
     shift = f"{split}/joint_answer_shift/"
     assert last[shift + "agreement_post"] == first[shift + "agreement_pre"]
+    for k in TOP_K:
+      assert (
+        last[shift + f"top{k}_overlap_post"] == first[shift + f"top{k}_overlap_pre"]
+      )
   assert last["joint_val/answer_shift_kl"] == pytest.approx(0, abs=1e-7)
   for key, value in last.items():
     if key.startswith("joint_val/marginal_answer_shift/"):

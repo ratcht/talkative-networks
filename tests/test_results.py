@@ -5,6 +5,8 @@ median over the 5 epochs around the best joint_val epoch.
   uv run pytest tests/test_results.py
 """
 
+import pytest
+
 from testbed.results import epochs_around_best, median_around_best
 
 
@@ -39,6 +41,19 @@ def test_short_runs_use_what_they_have():
   bagging = history([0.5], [0.6])  # no exchange, so no training
   assert list(epochs_around_best(bagging)) == [0]
   assert median_around_best(bagging) == 0.6
+
+
+def test_another_joint_val_metric_can_pick_the_epochs():
+  run = history([0, 0.9, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1], [0, 1, 2, 3, 4, 5, 6, 7])
+  own = [0, 0.1, 0.1, 0.1, 0.1, 0.1, 0.2, 0.9]  # one expert, best at the end
+  for step, value in zip(run, own):
+    step["joint_val/expert_accuracy/expert2"] = value
+  picked = "joint_val/expert_accuracy/expert2"
+  assert list(epochs_around_best(run)) == [1, 2, 3, 4, 5]
+  assert list(epochs_around_best(run, picked_by=picked)) == [3, 4, 5, 6, 7]
+  assert median_around_best(run, picked_by=picked) == 5
+  with pytest.raises(ValueError):  # nothing selects on test
+    epochs_around_best(run, picked_by="test/accuracy")
 
 
 def test_one_odd_epoch_does_not_move_the_median():

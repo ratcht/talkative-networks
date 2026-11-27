@@ -93,9 +93,10 @@ metrics on the experts' own answers stay at their step-0 values (moe.md §4).
 
 **Messages.** In an exchange, expert $i$ sends a value
 $v_{n,i} \in \mathbb{R}^{d_v}$, where $d_v$ is the channel's `value_dim` (64 by
-default). The mixer gives each receiver $r$ a weight $w_{n,rs}$ for every
-sender $s$. The weights are non-negative and sum to 1 over $s$, and the
-receiver gets the weighted average
+default), along with a query $q_{n,i}$ and a key $k_{n,i}$. The `linear_taper`
+encoders build all three from the same readings $z_{n,i}$. The mixer gives each
+receiver $r$ a weight $w_{n,rs}$ for every sender $s$. The weights are
+non-negative and sum to 1 over $s$, and the receiver gets the weighted average
 
 $$
 m_{n,r} = \sum_{s} w_{n,rs} \, v_{n,s} ,
@@ -119,13 +120,15 @@ statement holds. $\operatorname{mean}_n$ averages over examples.
 | `loss` | the training objective | — |
 | `expert_accuracy` | share of the experts' own answers that are correct | — |
 | `answer_grid` | shares of examples by how many experts are right, and whether the average is | the five cells sum to 1; bagging's grid at step 0 |
-| `joint_answer_shift` | answers communication corrected and corrupted | `pre_accuracy` constant across arms, trials and epochs; `net` = 0 at step 0 |
+| `joint_answer_shift` | answers communication corrected and corrupted; how often experts agree and share their top 2 and 3 | `pre_accuracy` constant across arms, trials and epochs; `net` = 0 at step 0 |
 | `marginal_answer_shift` | the same, with only one expert's update applied | 0 at step 0 |
 | `answer_shift_kl` | how far communication moved the experts' probabilities | 0 at step 0 |
 | `routed_correct` | how often the expert a receiver listened to was right | — |
-| `msg_norm` | size of what is sent, received and injected | `injection` = 0 at step 0 |
+| `msg_norm` | size of what is sent, received and injected, and of the queries, keys and readings | `injection` = 0 at step 0 |
+| `msg_spread` | share of the value, query, key and readings that differs between images | between 0 and 1 |
 | `attn_entropy` | how evenly receivers spread their attention | between 0 and $\log M$ |
 | `attn_top1` | each receiver's largest attention weight | between $1/M$ and 1 |
+| `attn_heard` | who each receiver hears | each receiver's shares sum to 1 |
 | `qk_cos_gap` | how far apart each receiver's query puts the senders, by direction | between 0 and 2 |
 | `routing_mode_share` | share of examples routed the most common way | — |
 | `self_attn_rate` | how often a receiver listens most to itself | — |
@@ -137,6 +140,7 @@ statement holds. $\operatorname{mean}_n$ averages over examples.
 | `msg_rank_ratio` | directions received relative to directions sent | — |
 | `grad_norm` | size of the gradient reaching each part of the channel | — |
 | `update_ratio` | how far one step moves each part, relative to its size | — |
+| `weight_norm` | size of each part's weights | absent at step 0 |
 
 ## 5. Task performance
 
@@ -189,6 +193,17 @@ and test.
 
 The intent of this measurement is to show whether communication improved the
 experts themselves or only their combined answer.
+
+Each expert's own share is logged too, under `expert_accuracy/expert{i}`:
+
+$$
+\texttt{expert_accuracy/expert}i = \operatorname*{mean}_{n} \, [\, \hat y^{\text{post}}_{n,i} = y_n \,] .
+$$
+
+The experts' shares average to `expert_accuracy`, but the average can hide what
+one expert did. In a group with one untrained expert, that expert's share is
+how much it gained from listening, while the average mostly shows the trained
+experts.
 
 ## 6. Communication interpretation
 
@@ -326,6 +341,35 @@ Agreement rising while `net` does not means the experts are converging on
 each other's answers rather than on the right one: consensus without
 correctness.
 
+Agreement only compares the experts' top answers. The next four kinds also
+compare their runners-up: how much of two experts' $k$ most likely classes the
+two have in common, for $k = 2$ and $3$. Write $\operatorname{top}_k(n, i)$ for
+the set of expert $i$'s $k$ most likely classes on example $n$:
+
+$$
+\texttt{top}k\texttt{_overlap_pre} = \operatorname*{mean}_n \; \operatorname*{mean}_{i < j} \, \frac{\lvert \operatorname{top}_k^{\text{pre}}(n, i) \cap \operatorname{top}_k^{\text{pre}}(n, j) \rvert}{k} ,
+$$
+
+and `top`$k$`_overlap_post` likewise after communication. At $k = 1$ it would
+be agreement.
+
+Each $k$ asks its own question, so the values at different $k$ don't line up:
+
+- **Order within a shortlist doesn't count.** An expert answering shirt with
+  coat second and one answering coat with shirt second share their whole top
+  2. Read with agreement, that tells apart experts that disagree on everything
+  from experts that consider the same few classes and pick differently.
+- **It isn't a looser agreement.** Experts often agree on the answer more than
+  on the runner-up, so `top2_overlap` can sit below agreement.
+- **Chance is $k / C$.** Experts that rank the $C$ classes at random share
+  $k/C$ of their shortlists on average: 0.2 and 0.3 with 10 classes.
+
+It reads only the order of each expert's classes, not their probabilities, so
+it still sees runners-up a confident expert gives almost no probability. On
+Fashion-MNIST the second class gets a median probability of 0.006, yet two
+experts trained from different seeds share 0.84 of their top 2 before
+communication.
+
 Logged on all three splits. On the joint split it covers the epoch's batches
 as the channel was at each batch, so it trails joint_val slightly; its
 `pre_accuracy` is still constant, since the experts and the joint split never
@@ -423,20 +467,16 @@ logged. Needs a mixer with weights.
 
 These metrics describe what one exchange sends, how it is weighted and what is
 injected, independently of what the experts then do with it. They are logged
-per site, on joint_val. The five on attention and routing read the mixer's
-weights, and are logged only for a mixer that has them: `attention` does, the
-`self` and `mean` controls don't. So are `qk_cos_gap` and `msg_norm`'s
-`query` and `key`.
+per site, on joint_val. The six on attention and routing read the mixer's
+weights, and are logged only for a mixer that has them: `attention` and
+`rmsnorm_attention` do, the `self` and `mean` controls don't. `qk_cos_gap`
+reads the queries and keys, and is logged for the same mixers.
 
 ### `msg_norm`
 
 The average size of what is sent, received and injected:
 
 $$
-\texttt{query} = \operatorname*{mean}_{n,i} \lVert q_{n,i} \rVert ,
-\qquad
-\texttt{key} = \operatorname*{mean}_{n,i} \lVert k_{n,i} \rVert ,
-\qquad
 \texttt{value} = \operatorname*{mean}_{n,i} \lVert v_{n,i} \rVert ,
 \qquad
 \texttt{aggregated} = \operatorname*{mean}_{n,r} \lVert m_{n,r} \rVert ,
@@ -453,6 +493,57 @@ other reading of that run means anything.
 
 The intent of this measurement is to find where messages vanish, if they do:
 in sending (`value`), in mixing (`aggregated`) or in decoding (`injection`).
+
+The same keys hold the size of the queries, keys and readings, over all experts
+and for each sender, and the size of each sender's value:
+
+$$
+\texttt{query} = \operatorname*{mean}_{n,i} \lVert q_{n,i} \rVert ,
+\qquad
+\texttt{key} = \operatorname*{mean}_{n,i} \lVert k_{n,i} \rVert ,
+\qquad
+\texttt{reading} = \operatorname*{mean}_{n,i} \lVert z_{n,i} \rVert ,
+$$
+
+$$
+\texttt{query/expert}i = \operatorname*{mean}_{n} \lVert q_{n,i} \rVert ,
+$$
+
+and in the same way for `key`, `reading` and `value`. These are the sizes the
+encoders made, before any mixer rescales them. So under `rmsnorm_attention` the
+query and key stop mattering to the routing but are still measured: they are
+not the fixed length that mixer rescales to. Under `self` and `mean` no mixer
+reads them at all, and they are logged all the same, which shows what they
+would have been. `reading` is logged only for an encoder with readings, the
+`linear_taper` encoders and their GELU versions.
+
+The intent of this measurement is to see the size that sets how sharp
+attention is. The score of a sender is $q \cdot k / \sqrt{d_k}$, so larger
+queries and keys make the softmax harder to move off one sender. The readings
+sit under all three heads, so they show whether a query grew because of its own
+head or because of what its head was given.
+
+### `msg_spread`
+
+The share of what an encoder makes that differs between images. For expert $i$
+and one part, take that part on every example, $X_i = (x_{n,i})_n$, and split it
+around its average over examples, $\tilde X_i = \operatorname{mean}_n x_{n,i}$:
+
+$$
+\texttt{msg_spread/expert}i = \frac{\lVert X_i - \tilde X_i \rVert}{\lVert X_i \rVert} .
+$$
+
+The bare keys, `msg_spread/value` and so on, are the mean over experts. The
+parts are `value`, `query`, `key` and, for an encoder that has them, `reading`.
+
+It is `inj_spread` for what is sent instead of what is written. At 0 the part is
+the same on every image. The two pieces are at right angles, so the share of the
+size shared by every image is $\sqrt{1 - \texttt{msg_spread}^2}$.
+
+The intent of this measurement is to tell whether a part grew in what it carries
+about the image or in what it adds to every image. Compare it with the spread of
+the features being read, not with 1: stage 2's features are largely the same on
+every image, so an untrained reading has a low spread already.
 
 ### `attn_entropy`
 
@@ -481,6 +572,27 @@ Unlike the entropy, its scale does not depend on $M$. Read the two together:
 one dominant sender with a flat tail (high `attn_top1`, middling entropy) and
 weight split evenly between two senders (both middling) look alike in entropy
 alone.
+
+### `attn_heard`
+
+Who each receiver hears: the share of its attention on each sender, averaged
+over examples:
+
+$$
+\texttt{attn_heard/expert}r\texttt{/from}s = \operatorname*{mean}_n \, w_{n,rs} .
+$$
+
+Each receiver's shares sum to 1 over the senders, and `expert`$r$`/from`$r$ is
+the share it keeps for its own message. With $M$ experts that is $M^2$ keys per
+site.
+
+`attn_top1` and `routing_mode_share` say how one-sided routing is and how much
+it depends on the input, but not who is being heard. The intent of this
+measurement is to tell those apart: every receiver on one sender, each receiver
+on a sender of its own, or a receiver dividing its attention. A share near 1
+with a `routing_mode_share` near 1 is a fixed wire from that sender. Middling
+shares can be a blend on every image or a different sender on different images,
+and `attn_top1` separates those: it stays near 1 for the second.
 
 ### `qk_cos_gap`
 
@@ -779,6 +891,18 @@ that step is left out of the part's average. This happens to
 `decoder.write`, whose patterns start at zero, on the first step of training.
 A part that stays all zero for a whole epoch reads 0.
 
+### `weight_norm`
+
+The size of each part's weights after each epoch, measured like `grad_norm`:
+over the whole part, pooled over experts. It starts at step 1, like the other
+training dynamics.
+
+The intent of this measurement is to tell a part that grew from one that only
+turned. `update_ratio` bounds how far a part could have grown, but a part can
+move a lot and stay the same size. Compare it with `msg_norm`: a part's output
+can grow many times over while its weights hardly change, if the weights turn
+towards something large in their input.
+
 ## 9. Changes from v2
 
 - **One version per metric.** v2 logged most communication metrics twice: on
@@ -808,5 +932,6 @@ A part that stays all zero for a whole epoch reads 0.
   - `layernorm_param_norm`: v3 has no LayerNorm.
   - `pool_mask_dev`: no v3 encoder has a fixed learned mask.
   - The per-batch copies of the routing and answer-shift metrics.
-- **New in v3.** `expert_accuracy`, from the testbed skeleton, and
-  `answer_grid`.
+- **New in v3.** `expert_accuracy`, from the testbed skeleton, `answer_grid`,
+  `attn_heard`, `msg_spread`, `weight_norm`, and the `query`, `key` and
+  `reading` parts of `msg_norm`.

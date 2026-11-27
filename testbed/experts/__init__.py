@@ -3,6 +3,8 @@ from testbed.experts.pool import Pool, get_pool
 from testbed.experts.schemes import (
   Budget,
   ClassSkew,
+  DataShard,
+  DisjointSubset,
   IndependentScheme,
   NegativeCorrelation,
   Recipe,
@@ -10,12 +12,16 @@ from testbed.experts.schemes import (
   Scheme,
   SeedOnly,
   TrainedExpert,
+  Untrained,
+  untrained_expert,
 )
 
 __all__ = [
   "ARCHITECTURES",
   "Budget",
   "ClassSkew",
+  "DataShard",
+  "DisjointSubset",
   "Expert",
   "IndependentScheme",
   "NegativeCorrelation",
@@ -25,6 +31,8 @@ __all__ = [
   "Scheme",
   "SeedOnly",
   "TrainedExpert",
+  "Untrained",
   "build",
   "get_pool",
+  "untrained_expert",
 ]

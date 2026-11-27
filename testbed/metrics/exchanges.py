@@ -26,18 +26,22 @@ ZERO_RESID = 1e-6
 
 class ExchangeMeter:
   def __init__(self):
-    self.queries: list[torch.Tensor] = []
-    self.keys: list[torch.Tensor] = []
     self.values: list[torch.Tensor] = []
     self.received: list[torch.Tensor] = []
+    self.queries: list[torch.Tensor] = []
+    self.keys: list[torch.Tensor] = []
+    self.readings: list[torch.Tensor] = []
     self.weights: list[torch.Tensor] = []
     self.answers: list[torch.Tensor] = []
     self.injections: list[InjectionSums] = []
 
   def add(self, trace: Trace) -> None:
-    self.queries.append(trace.reading.sent.query)
-    self.keys.append(trace.reading.sent.key)
-    self.values.append(trace.reading.sent.value)
+    sent = trace.reading.sent
+    self.values.append(sent.value)
+    self.queries.append(sent.query)
+    self.keys.append(sent.key)
+    if sent.readings is not None:
+      self.readings.append(sent.readings)
     self.received.append(trace.reading.received)
     if trace.reading.weights is not None:
       self.weights.append(per_expert(trace.reading.weights))
@@ -59,8 +63,14 @@ class ExchangeMeter:
     same examples, and its routes, for the next pass's route_flip_rate."""
     values, received = torch.cat(self.values), torch.cat(self.received)
     injections = [sums.result() for sums in self.injections]
-    out = {
-      "msg_norm/value": values.norm(dim=-1).mean().item(),
+    sent = {
+      "value": values,
+      "query": torch.cat(self.queries),
+      "key": torch.cat(self.keys),
+    }
+    if self.readings:
+      sent["reading"] = torch.cat(self.readings)
+    out = sent_statistics(sent) | {
       "msg_norm/aggregated": received.norm(dim=-1).mean().item(),
       "msg_norm/injection": mean(i["norm"] for i in injections),
       "inj_spread": mean(i["spread"] for i in injections),
@@ -75,12 +85,7 @@ class ExchangeMeter:
     if not self.weights:  # a mixer without weights has no routing to read
       return out, None
     weights = torch.cat(self.weights)
-    queries, keys = torch.cat(self.queries), torch.cat(self.keys)
-    out |= {
-      "msg_norm/query": queries.norm(dim=-1).mean().item(),
-      "msg_norm/key": keys.norm(dim=-1).mean().item(),
-      "qk_cos_gap": cos_gap(queries, keys),
-    }
+    out["qk_cos_gap"] = cos_gap(sent["query"], sent["key"])
     routing_metrics, routes = routing(weights, pre, post, y, previous_routes)
     return out | attention(weights) | routing_metrics, routes
 
@@ -92,12 +97,39 @@ def per_expert(weights: torch.Tensor) -> torch.Tensor:
   return weights.sum(-1).mean(2)
 
 
+def sent_statistics(parts: dict[str, torch.Tensor]) -> dict[str, float]:
+  """parts (N, M, T, D): what each expert sent, as its encoder made it, before
+  a mixer rescales anything. How large each part is and how much of it differs
+  between images, over all experts and for each."""
+  out = {}
+  for name, part in parts.items():
+    sizes = part.norm(dim=-1).mean((0, 2)).tolist()  # one per expert
+    spreads = [spread(part[:, i].flatten(0, 1)) for i in range(part.shape[1])]
+    out[f"msg_norm/{name}"] = mean(sizes)
+    out[f"msg_spread/{name}"] = mean(spreads)
+    for i, (size, share) in enumerate(zip(sizes, spreads)):
+      out[f"msg_norm/{name}/expert{i}"] = size
+      out[f"msg_spread/{name}/expert{i}"] = share
+  return out
+
+
+def spread(rows: torch.Tensor) -> float:
+  """The share of rows (N, D) that differs from row to row, as inj_spread
+  measures it: 0 is the same row every time."""
+  rows = rows.double()
+  size = rows.norm()
+  return 0.0 if size == 0 else ((rows - rows.mean(0)).norm() / size).item()
+
+
 def attention(weights: torch.Tensor) -> dict[str, float]:
   """weights (N, M, M): receiver r's row says how it weighted each sender."""
-  return {
+  out = {
     "attn_entropy": -xlogy(weights, weights).sum(-1).mean().item(),
     "attn_top1": weights.max(-1).values.mean().item(),
   }
+  for r, shares in enumerate(weights.mean(0)):
+    out |= {f"attn_heard/expert{r}/from{s}": w.item() for s, w in enumerate(shares)}
+  return out
 
 
 def cos_gap(queries: torch.Tensor, keys: torch.Tensor) -> float:

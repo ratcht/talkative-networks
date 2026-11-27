@@ -15,6 +15,9 @@ import torch.nn.functional as F
 
 from testbed.communication.ensemble import average
 
+# The shortlist sizes top-k overlap compares. k = 1 would be agreement.
+TOP_K = (2, 3)
+
 
 def accuracy(
   post: torch.Tensor, y: torch.Tensor, weights: torch.Tensor | None = None
@@ -26,6 +29,12 @@ def accuracy(
 def expert_accuracy(post: torch.Tensor, y: torch.Tensor) -> float:
   """Share of (example, expert) pairs where the expert's own answer is correct."""
   return rate(post.argmax(-1) == y[:, None])
+
+
+def each_expert_accuracy(post: torch.Tensor, y: torch.Tensor) -> dict[str, float]:
+  """expert_accuracy for each expert on its own."""
+  right = (post.argmax(-1) == y[:, None]).float().mean(0)
+  return {f"expert{i}": share.item() for i, share in enumerate(right)}
 
 
 def answer_grid(
@@ -67,6 +76,10 @@ def joint_answer_shift(
     "net": corrected - corrupted,
     "agreement_pre": agreement(pre),
     "agreement_post": agreement(post),
+  } | {
+    f"top{k}_overlap_{when}": topk_overlap(logits, k)
+    for k in TOP_K
+    for when, logits in (("pre", pre), ("post", post))
   }
 
 
@@ -103,6 +116,18 @@ def agreement(logits: torch.Tensor) -> float:
   m = answers.shape[1]
   same = (answers[:, :, None] == answers[:, None, :]).float().mean(0)  # (M, M)
   return ((same.sum() - m) / (m * (m - 1))).item()  # the diagonal is all ones
+
+
+def topk_overlap(logits: torch.Tensor, k: int) -> float:
+  """Share of two experts' k most likely classes that they have in common,
+  averaged over every pair of experts and over examples. The order within
+  each shortlist doesn't count."""
+  top = logits.topk(k, -1).indices  # (N, M, k)
+  m = top.shape[1]
+  # shared[n, i, j]: how many of expert i's k classes are among expert j's
+  shared = (top[:, :, None, :, None] == top[:, None, :, None, :]).any(-1).sum(-1)
+  pairs = torch.triu_indices(m, m, offset=1, device=top.device)
+  return (shared[:, pairs[0], pairs[1]].float() / k).mean().item()
 
 
 def rate(mask: torch.Tensor) -> float:

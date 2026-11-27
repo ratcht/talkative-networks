@@ -24,8 +24,9 @@ def component(name: str) -> str:
 
 class OptimisationMeter:
   """Gradient norm and update ratio per component, averaged over the steps
-  since the last result(). Call before_step() between backward() and the
-  optimiser's step(), and after_step() right after it.
+  since the last result(), and the size of its weights at that moment. Call
+  before_step() between backward() and the optimiser's step(), and after_step()
+  right after it.
 
   The channel's weights are handled as one flat vector, with the series each
   weight belongs to alongside, so a step costs a few tensor operations however
@@ -75,12 +76,14 @@ class OptimisationMeter:
 
   def result(self) -> dict[str, float]:
     out = {}
-    for name, g, u in zip(
+    for name, g, u, w in zip(
       self.names,
       (self.grad_norm / self.steps).tolist(),
       (self.update_ratio / self.measured.clamp_min(1)).tolist(),
+      self._norms(parameters_to_vector(self.params)).tolist(),
     ):
       out[f"grad_norm/{name}"] = g
       out[f"update_ratio/{name}"] = u
+      out[f"weight_norm/{name}"] = w
     self.reset()
     return out

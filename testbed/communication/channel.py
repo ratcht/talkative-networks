@@ -22,8 +22,10 @@ The `linear_taper` encoders and decoders are two linear layers through a
 narrow width that read and write the whole feature map, so they never pool or
 broadcast; `linear_taper_gelu` adds a GELU between the two. The `self` and
 `mean` mixers are controls: the same channel without communication, or without
-choosing whom to listen to. `pooled`, `spatial` and `broadcast` make spatial
-assumptions. docs/testbed/channel.md defines every part.
+choosing whom to listen to. `rmsnorm_attention` is attention with RMS-normed
+queries and keys, so it reads only their directions, not their sizes. `pooled`,
+`spatial` and `broadcast` make spatial assumptions. docs/testbed/channel.md
+defines every part.
 
 For now every encoder sends exactly one message per expert
 (MESSAGES_PER_EXPERT). The mixer and decoders already handle any T, so
@@ -56,6 +58,9 @@ class Message:
   query: torch.Tensor  # (B, T, key_dim) what the sender wants to hear about
   key: torch.Tensor  # (B, T, key_dim) what the message is about
   value: torch.Tensor  # (B, T, value_dim) what it says
+  # (B, T, width) what all three were built from, for an encoder that reads
+  # its features into a shared set of numbers; the metrics read it
+  readings: torch.Tensor | None = None
 
 
 class Encoder(nn.Module, ABC):
@@ -117,7 +122,9 @@ class LinearTaperEncoder(Encoder):
     readings = self.read(features.flatten(1)).unsqueeze(1)  # (B, 1, width)
     if self.gelu:
       readings = F.gelu(readings)
-    return Message(self.query(readings), self.key(readings), self.value(readings))
+    return Message(
+      self.query(readings), self.key(readings), self.value(readings), readings
+    )
 
 
 class LinearTaperGELUEncoder(LinearTaperEncoder):
@@ -339,10 +346,12 @@ class Channel(nn.Module):
           f"an encoder sent {message.value.shape[1]} messages; "
           f"each expert sends {MESSAGES_PER_EXPERT} for now"
         )
+    has_readings = all(m.readings is not None for m in messages)
     sent = Message(
       torch.stack([m.query for m in messages], dim=1),
       torch.stack([m.key for m in messages], dim=1),
       torch.stack([m.value for m in messages], dim=1),
+      torch.stack([m.readings for m in messages], dim=1) if has_readings else None,
     )
     received, weights = self.mixer(sent.query, sent.key, sent.value)
     return Reading(sent, weights, received)

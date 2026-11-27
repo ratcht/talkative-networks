@@ -35,4 +35,17 @@ class RandomSubset:
     )
 
 
-SELECTORS = {"first": TakeFirst, "random": RandomSubset}
+@dataclass(frozen=True)
+class ClonesOfFirst:
+  """The pool's first expert, once per place in the group: a group of identical
+  experts. The group can then be a pool the other arms already use."""
+
+  def select(self, pool: Pool, size: int, seed: int) -> list[int]:
+    return [0] * size
+
+
+SELECTORS = {
+  "first": TakeFirst,
+  "random": RandomSubset,
+  "clones_of_first": ClonesOfFirst,
+}
