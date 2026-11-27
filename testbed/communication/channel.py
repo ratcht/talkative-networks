@@ -95,11 +95,23 @@ class Reading:
   received: torch.Tensor  # (B, M, T, value_dim)
 
 
-def positions(features: torch.Tensor) -> torch.Tensor:
-  """(B, C, H, W) -> (B, H*W, C), one row per position; (B, D) -> (B, 1, D)."""
-  return (
-    features.flatten(2).transpose(1, 2) if features.dim() > 2 else features.unsqueeze(1)
-  )
+def positions(features: torch.Tensor, tokens: int = 0) -> torch.Tensor:
+  """(B, C, H, W) -> (B, H*W, C), one row per grid position; (B, D) -> (B, 1, D).
+  The first `tokens` positions of a stream are not grid positions (a ViT's
+  class token) and are left out, so (B, C, 1 + P) -> (B, P, C)."""
+  if features.dim() <= 2:
+    return features.unsqueeze(1)
+  return features.flatten(2)[:, :, tokens:].transpose(1, 2)
+
+
+def onto_grid(rows: torch.Tensor, features: torch.Tensor, tokens: int) -> torch.Tensor:
+  """The inverse of positions(): (B, P, C) rows -> a tensor shaped like
+  `features`, zero at the `tokens` positions that aren't on the grid."""
+  b, c = features.shape[:2]
+  grid = rows.transpose(1, 2)  # (B, C, P)
+  if tokens:
+    grid = torch.cat([grid.new_zeros(b, c, tokens), grid], dim=2)
+  return grid.reshape(features.shape)
 
 
 class LinearTaperEncoder(Encoder):
@@ -111,7 +123,7 @@ class LinearTaperEncoder(Encoder):
 
   gelu = False
 
-  def __init__(self, config: ChannelConfig, in_shape: tuple[int, ...]):
+  def __init__(self, config: ChannelConfig, in_shape: tuple[int, ...], tokens: int = 0):
     super().__init__()
     self.read = nn.Linear(math.prod(in_shape), config.width)
     self.query = nn.Linear(config.width, config.key_dim)
@@ -140,15 +152,16 @@ class PooledEncoder(Encoder):
   query, key and value. The v2 default, and no spatial read port beat it in
   v2's Study 02."""
 
-  def __init__(self, config: ChannelConfig, in_shape: tuple[int, ...]):
+  def __init__(self, config: ChannelConfig, in_shape: tuple[int, ...], tokens: int = 0):
     super().__init__()
     channels = in_shape[0]
+    self.tokens = tokens
     self.query = nn.Linear(channels, config.key_dim)
     self.key = nn.Linear(channels, config.key_dim)
     self.value = nn.Linear(channels, config.value_dim)
 
   def forward(self, features: torch.Tensor) -> Message:
-    summary = positions(features).mean(1, keepdim=True)  # (B, 1, C)
+    summary = positions(features, self.tokens).mean(1, keepdim=True)  # (B, 1, C)
     return Message(self.query(summary), self.key(summary), self.value(summary))
 
 
@@ -157,9 +170,10 @@ class SpatialEncoder(Encoder):
   summing them into the message, so where an expert saw something can shape
   what it says."""
 
-  def __init__(self, config: ChannelConfig, in_shape: tuple[int, ...]):
+  def __init__(self, config: ChannelConfig, in_shape: tuple[int, ...], tokens: int = 0):
     super().__init__()
-    channels, count = in_shape[0], math.prod(in_shape[1:])
+    channels, count = in_shape[0], math.prod(in_shape[1:]) - tokens
+    self.tokens = tokens
     self.position = nn.Parameter(torch.randn(count, channels) * 0.02)
     self.score = nn.Linear(channels, 1)
     self.query = nn.Linear(channels, config.key_dim)
@@ -167,7 +181,7 @@ class SpatialEncoder(Encoder):
     self.value = nn.Linear(channels, config.value_dim)
 
   def forward(self, features: torch.Tensor) -> Message:
-    rows = positions(features) + self.position  # (B, P, C)
+    rows = positions(features, self.tokens) + self.position  # (B, P, C)
     weights = self.score(rows).softmax(1)  # (B, P, 1)
     summary = (weights * rows).sum(1, keepdim=True)  # (B, 1, C)
     return Message(self.query(summary), self.key(summary), self.value(summary))
@@ -242,7 +256,9 @@ class LinearTaperDecoder(Decoder):
 
   gelu = False
 
-  def __init__(self, config: ChannelConfig, out_shape: tuple[int, ...]):
+  def __init__(
+    self, config: ChannelConfig, out_shape: tuple[int, ...], tokens: int = 0
+  ):
     super().__init__()
     self.narrow = nn.Linear(config.value_dim, config.width)
     self.write = nn.Linear(config.width, math.prod(out_shape), bias=False)
@@ -265,10 +281,13 @@ class LinearTaperGELUDecoder(LinearTaperDecoder):
 
 class BroadcastDecoder(Decoder):
   """Turns what was received into one value per channel and injects it at
-  every position."""
+  every grid position, and nothing into a token that isn't on the grid."""
 
-  def __init__(self, config: ChannelConfig, out_shape: tuple[int, ...]):
+  def __init__(
+    self, config: ChannelConfig, out_shape: tuple[int, ...], tokens: int = 0
+  ):
     super().__init__()
+    self.tokens = tokens
     self.mlp = nn.Sequential(
       nn.Linear(config.value_dim, config.value_dim),
       nn.GELU(),
@@ -279,19 +298,23 @@ class BroadcastDecoder(Decoder):
 
   def forward(self, received: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
     injection = self.mlp(received.mean(1))  # (B, C)
-    return injection.view(*injection.shape, *[1] * (features.dim() - 2)).expand_as(
-      features
-    )
+    if features.dim() <= 2:
+      return injection
+    rows = positions(features, self.tokens)
+    return onto_grid(injection[:, None].expand_as(rows), features, self.tokens)
 
 
 class SpatialDecoder(Decoder):
   """Every position of the receiving expert's features combines its own
   features with what was received, so a message can land differently in
-  different places."""
+  different places. A token that isn't on the grid gets nothing."""
 
-  def __init__(self, config: ChannelConfig, out_shape: tuple[int, ...]):
+  def __init__(
+    self, config: ChannelConfig, out_shape: tuple[int, ...], tokens: int = 0
+  ):
     super().__init__()
     channels = out_shape[0]
+    self.tokens = tokens
     self.mlp = nn.Sequential(
       nn.Linear(channels + config.value_dim, config.value_dim),
       nn.GELU(),
@@ -301,10 +324,10 @@ class SpatialDecoder(Decoder):
     nn.init.zeros_(self.mlp[-1].bias)
 
   def forward(self, received: torch.Tensor, features: torch.Tensor) -> torch.Tensor:
-    rows = positions(features)  # (B, P, C)
+    rows = positions(features, self.tokens)  # (B, P, C)
     message = received.mean(1, keepdim=True).expand(-1, rows.shape[1], -1)
     injection = self.mlp(torch.cat([rows, message], dim=-1))  # (B, P, C)
-    return injection.transpose(1, 2).reshape(features.shape)
+    return onto_grid(injection, features, self.tokens)
 
 
 ENCODERS: dict[str, type[Encoder]] = {
@@ -377,9 +400,12 @@ def build_channel(
   read_shape: tuple[int, ...],
   write_shape: tuple[int, ...],
   num_experts: int,
+  tokens: int = 0,
 ) -> Channel:
+  """`tokens`: how many leading positions of the experts' stream are not grid
+  positions (Expert.tokens), which parts that read or write positions skip."""
   return Channel(
-    [ENCODERS[config.encoder](config, read_shape) for _ in range(num_experts)],
+    [ENCODERS[config.encoder](config, read_shape, tokens) for _ in range(num_experts)],
     MIXERS[config.mixer](config),
-    [DECODERS[config.decoder](config, write_shape) for _ in range(num_experts)],
+    [DECODERS[config.decoder](config, write_shape, tokens) for _ in range(num_experts)],
   )

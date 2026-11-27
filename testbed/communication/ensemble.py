@@ -48,6 +48,8 @@ class Trace:
   # (B, M, classes): the experts' answers had communication stopped after this
   # round. Backward rounds only, and only when the forward pass is asked for them.
   answers: torch.Tensor | None = None
+  # leading positions of the stream that aren't grid positions (Expert.tokens)
+  tokens: int = 0
 
   @property
   def site(self) -> str:
@@ -128,6 +130,7 @@ class CommunicatingEnsemble(nn.Module):
     self.exchanges = list(exchanges)
     self.channels = nn.ModuleList(channels)
     self.rounds = rounds
+    self.tokens = experts[0].tokens
 
   def train(self, mode: bool = True):
     super().train(mode)
@@ -166,7 +169,7 @@ class CommunicatingEnsemble(nn.Module):
           reading = readings.pop(i)
           injection = self.channels[i].write(reading.received, features)
           features = [f + d for f, d in zip(features, injection)]
-          traces.append(Trace(i, None, reading, injection))
+          traces.append(Trace(i, None, reading, injection, tokens=self.tokens))
         if ex.read == stage:
           readings[i] = self.channels[i].read(features)
     return torch.stack(features, dim=1), traces
@@ -192,7 +195,7 @@ class CommunicatingEnsemble(nn.Module):
         for expert, f, d in zip(self.experts, early, injection)
       ]
       answers = self._answer(late, ex.read) if answer_each_round else None
-      traces.append(Trace(0, r, reading, injection, answers))
+      traces.append(Trace(0, r, reading, injection, answers, self.tokens))
     logits = traces[-1].answers if answer_each_round else self._answer(late, ex.read)
     return logits, traces
 
@@ -217,10 +220,14 @@ def build_ensemble(
   if exchanges:
     for expert in experts:
       expert.stream_shape(input_shape)
+  if len({e.tokens for e in experts}) != 1:
+    raise ValueError("experts must agree on which stream positions are grid positions")
   shapes = experts[0].point_shapes(input_shape)
   with seeded(seed):
     channels = [
-      build_channel(config, shapes[ex.read], shapes[ex.write], len(experts))
+      build_channel(
+        config, shapes[ex.read], shapes[ex.write], len(experts), experts[0].tokens
+      )
       for ex in exchanges
     ]
   device = next(experts[0].parameters()).device

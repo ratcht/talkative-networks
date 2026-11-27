@@ -20,6 +20,12 @@ Decided by the user on 2026-11-27, after the v4 task-model selection
 - **Expert generation** stays modular as in v3: a pool can be seed-only or
   class-skewed (or any other scheme).
 - **Joint training** uses no augmentation, as in v3.
+- **The ViT's class token is not a grid position.** Parts and metrics that
+  work position by position (`pooled`, `spatial`, `broadcast`,
+  `inj_resid_frac`, `inj_rank`) leave it out; parts that take the stream whole
+  read and write it.
+- Confirmed the same day: the extra study-branch metrics, class skew at α = 1
+  as the default scheme, and the open defaults below.
 - **From the oversampling-diversity study branch:** `merge_runs.py`, the
   encoder readings with top-k overlap, and the DisjointSubset, DataShard and
   Untrained schemes.
@@ -28,14 +34,18 @@ Claude's choices while building, pending the user's confirmation:
 
 - The study branch's other testbed changes came along, being entangled with
   the readings: `msg_spread`, per-expert `msg_norm`, `attn_heard`,
-  `weight_norm`, per-expert `expert_accuracy`, and `results.picked_by`.
-- The ViT's stream is handed over channels first, `(B, d, 65)`, so every
-  position-based part and metric treats the class token as position 0, like
-  any patch.
+  `weight_norm`, per-expert `expert_accuracy`, and `results.picked_by`
+  (confirmed).
+- The ViT's stream is handed over channels first, `(B, d, 65)`, the class
+  token first.
+- A decoder that works position by position writes nothing into the class
+  token, and `inj_resid_frac` is measured against the injection on the grid
+  alone (for a ResNet, the whole injection, as before).
 - Images are normalised per channel (v3 used one scalar, the same thing for
   one channel).
 - `--scheme` keeps v3's default, class skew at α = 1, which is unmeasured on
-  CIFAR-100's 100 classes; the selection measured seed-only experts.
+  CIFAR-100's 100 classes; the selection measured seed-only experts
+  (confirmed).
 - Augmentation has its own seed stream (`"augment"`), apart from the batch order.
 
 Open for v4:

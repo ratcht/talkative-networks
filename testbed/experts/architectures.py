@@ -14,7 +14,9 @@ only there, in the stream (docs/testbed/experts.md). The stream is handed
 over channels first, (B, C, *positions), in both families:
   resnet  (B, width, grid, grid): one row per grid cell
   vit     (B, width, 1 + patches): the class token, then one row per patch
-so a part that reads positions treats a token like a grid cell.
+so a part that reads positions treats a patch like a grid cell. The class
+token is in the stream but is not a grid position (Expert.tokens): parts and
+metrics that work position by position leave it out.
 
 Each family comes with the recipe it is usually trained with (RECIPES).
 """
@@ -32,6 +34,9 @@ class Expert(nn.Module):
   # Parameters an AdamW recipe leaves out of weight decay, by their last name,
   # besides every parameter with fewer than two dimensions (norms, biases).
   no_weight_decay: frozenset[str] = frozenset()
+  # Leading positions of the stream that aren't grid positions: a ViT's class
+  # token. Channel parts and metrics that work position by position skip them.
+  tokens: int = 0
 
   def __init__(self, stages: dict[str, nn.Module]):
     super().__init__()
@@ -235,6 +240,7 @@ def vit(
   stages["head"] = ViTHead(width, num_classes)
   model = Expert(stages)
   model.no_weight_decay = frozenset({"cls", "pos"})
+  model.tokens = 1  # the class token is in the stream but not on the grid
   for m in model.modules():
     if isinstance(m, nn.Linear):
       nn.init.trunc_normal_(m.weight, std=0.02)

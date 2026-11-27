@@ -48,7 +48,7 @@ class ExchangeMeter:
     if trace.answers is not None:
       self.answers.append(trace.answers)
     if not self.injections:
-      self.injections = [InjectionSums() for _ in trace.injection]
+      self.injections = [InjectionSums(trace.tokens) for _ in trace.injection]
     for sums, injection in zip(self.injections, trace.injection):
       sums.add(injection)
 
@@ -223,12 +223,16 @@ class InjectionSums:
   exactly, without keeping the injections. Float64, since inj_spread subtracts
   two nearly equal sums when the injection is close to constant."""
 
-  def __init__(self):
+  def __init__(self, tokens: int = 0):
+    self.tokens = (
+      tokens  # leading positions that aren't on the grid: left out of the spatial sums
+    )
     self.count = 0
     self.norm = 0.0  # sum over examples of each example's injection norm
     self.square = 0.0  # squared norm of every injection together
     self.total: torch.Tensor | None = None  # sum of the injections
-    self.resid_square = 0.0  # squared norm of the parts that vary over positions
+    self.grid_square = 0.0  # squared norm of the injection on the grid positions
+    self.resid_square = 0.0  # squared norm of the parts that vary over grid positions
     self.gram: torch.Tensor | None = None  # (C, P, P), summed over examples
 
   def add(self, injection: torch.Tensor) -> None:
@@ -237,8 +241,11 @@ class InjectionSums:
     self.norm += d.flatten(1).norm(dim=1).sum().item()
     self.square += d.pow(2).sum().item()
     self.total = _accumulate(self.total, d.sum(0))
-    if d.dim() > 2:  # a feature map (C, H, W): split off each channel's spatial mean
-      grid = d.flatten(2)  # (B, C, P)
+    if (
+      d.dim() > 2
+    ):  # a stream (C, *positions): split off each channel's mean over the grid
+      grid = d.flatten(2)[:, :, self.tokens :]  # (B, C, P), grid positions only
+      self.grid_square += grid.pow(2).sum().item()
       resid = grid - grid.mean(-1, keepdim=True)
       self.resid_square += resid.pow(2).sum().item()
       self.gram = _accumulate(self.gram, torch.einsum("bcp,bcq->cpq", resid, resid))
@@ -253,8 +260,8 @@ class InjectionSums:
       return out
     mean_square = self.total.pow(2).sum().item() / self.count
     out["spread"] = max(self.square - mean_square, 0.0) ** 0.5 / size
-    if self.gram is not None:
-      out["resid_frac"] = self.resid_square**0.5 / size
+    if self.gram is not None and self.grid_square**0.5 >= ZERO_NORM:
+      out["resid_frac"] = (self.resid_square / self.grid_square) ** 0.5
       if out["resid_frac"] >= ZERO_RESID:
         out["rank"] = participation_ratio(self.gram).mean().item()
     return out

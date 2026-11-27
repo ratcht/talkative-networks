@@ -225,6 +225,10 @@ for reference.
 | `broadcast` | decoder | one value per channel, the same at every position |
 | `spatial` | decoder | each position combines its own features with the message |
 
+On a ViT's stream these parts work on the 64 patches only: the class token is
+not a grid position ([Experts](experts.md) §1). The encoders never read it,
+and the decoders write nothing into it.
+
 ## 8. Attention on directions alone: `rmsnorm_attention`
 
 Under `attention` (§2), an encoder can sharpen the softmax just by sending

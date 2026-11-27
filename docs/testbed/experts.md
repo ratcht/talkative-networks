@@ -27,13 +27,22 @@ the channel uses the same skip connection as the blocks.
 one shape (`Expert.stream_shape`).
 
 The stream is handed over channels first, `(B, C, *positions)`, in both
-families, so a channel part that reads positions treats a ViT's token like a
+families, so a channel part that reads positions treats a ViT's patch like a
 ResNet's grid cell:
 
-| family | stream at every point | positions |
+| family | stream at every point | grid positions |
 |---|---|---|
 | ResNet $L \times w$ | $w \times 16 \times 16$ | the 256 grid cells |
-| ViT $L \times d$ | $d \times 65$ | the class token first, then the 64 patches |
+| ViT $L \times d$ | $d \times 65$: the class token, then the 64 patches | the 64 patches |
+
+**The class token is not a grid position.** It is in the stream, so the parts
+and metrics that take the stream whole (the linear taper encoders and
+decoders, the MoE gate, `msg_norm`, `inj_spread`) read and write it like any
+other number. Everything that works position by position leaves it out
+(`Expert.tokens`, 1 for the ViT): the `pooled` and `spatial` encoders read
+only the patches, the `broadcast` and `spatial` decoders write nothing into
+the class token, and `inj_resid_frac` and `inj_rank` describe the injection
+over the patches alone.
 
 The shape need only be uniform within one family's experts; a ResNet's
 stream and a ViT's are never mixed in one group.

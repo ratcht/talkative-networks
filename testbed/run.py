@@ -6,6 +6,7 @@ Run one arm of a study over a list of trial seeds.
   uv run python -m testbed.run --arm forward-self --exchange block4 block8 --mixer self --trial-seeds 0 1 2
   uv run python -m testbed.run --arm backward --exchange block8 block4 --rounds 2 --trial-seeds 0 1 2
   uv run python -m testbed.run --arm moe --gate linear_taper_gelu --gate-read block12 --trial-seeds 0 1 2
+  uv run python -m testbed.run --arm pools --pools-only --arch vit --trial-seeds 0 1 2
 
 An arm is bagging (no exchange), a communicating ensemble (--exchange), or the
 soft-gated MoE baseline (--gate, testbed/moe.py), which weighs the experts'
@@ -125,6 +126,10 @@ def check_flags(args: argparse.Namespace) -> None:
     raise SystemExit("--gate-read needs a --gate")
   if args.epsilon and args.scheme != "disjoint_subset":
     raise SystemExit(f"--epsilon belongs to disjoint_subset, not {args.scheme}")
+  if args.pools_only and (args.exchange or args.gate):
+    raise SystemExit(
+      "--pools-only trains experts and nothing else; drop --exchange/--gate"
+    )
 
 
 def code_version() -> dict[str, str]:
@@ -218,6 +223,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     "experts with no training",
   )
 
+  experts.add_argument(
+    "--pools-only",
+    action="store_true",
+    help="train (or load) each trial seed's pool into the expert cache and "
+    "stop: no channel, no MLflow run",
+  )
+
   comm = p.add_argument_group("communication")
   comm.add_argument(
     "--exchange", nargs=2, action="append", default=[], metavar=("READ", "WRITE")
@@ -309,6 +321,11 @@ def main(
   for trial_seed in args.trial_seeds:
     pool_seed = derive(trial_seed, "pool")
     pool = get_pool(scheme, args.arch, data, pool_size, pool_seed, budget)
+    if args.pools_only:
+      print(
+        f"[{args.arm}] trial seed {trial_seed}: pool {pool.key}  digest {pool.digest}"
+      )
+      continue
     group = selector.select(pool, args.experts, derive(trial_seed, "group"))
     experts = group_experts(
       pool, group, args.untrained_members, args.arch, data, pool_seed
@@ -383,6 +400,8 @@ def main(
       f"[{args.arm}] trial seed {trial_seed}: pool {pool.key}  bagging {history[0]['test/accuracy']:.4f}"
       f"  ensemble {accuracy:.4f}  gain {gain:+.4f}  epochs {epochs.start}-{epochs.stop - 1}"
     )
+  if args.pools_only:
+    return
   print(
     f"[{args.arm}] mean over {len(gains)} trial seeds: ensemble {mean(accuracies):.4f}"
     f"  gain over bagging {mean(gains):+.4f}"

@@ -758,6 +758,11 @@ strength the message sets reads high while carrying no spatial information.
 Read it with `inj_rank`. Logged only where the write point is a feature map,
 and reported as 0 when the injection is zero.
 
+On a ViT's stream the positions are the 64 patches: the class token is not a
+grid position ([Experts](experts.md) §1), so both the average and the norms
+above leave it out, here and in `inj_rank`. What the decoder writes into the
+class token still counts in `msg_norm/injection` and `inj_spread`.
+
 ### `inj_rank`
 
 How many distinct spatial patterns the injection uses. For receiver $r$ and

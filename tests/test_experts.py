@@ -246,3 +246,97 @@ def test_augmentation_never_shifts_the_batch_order():
     orders[on] = sampler.orders
   assert len(orders[True]) == 3
   assert all(torch.equal(a, b) for a, b in zip(orders[False], orders[True]))
+
+
+# ---------------------------------------------------------------- the class token
+
+
+def test_the_class_token_is_not_a_grid_position():
+  from testbed.communication.channel import onto_grid
+
+  vit_model, resnet_model = random_experts(1, "tiny_vit")[0], random_experts(1)[0]
+  assert vit_model.tokens == 1 and resnet_model.tokens == 0
+  stream = torch.randn(2, 32, 65)
+  rows = positions(stream, tokens=1)
+  assert rows.shape == (2, 64, 32)
+  assert torch.equal(rows, stream[:, :, 1:].transpose(1, 2))
+  back = onto_grid(rows, stream, tokens=1)
+  assert not back[:, :, 0].any() and torch.equal(back[:, :, 1:], stream[:, :, 1:])
+
+
+@pytest.mark.parametrize("encoder", ["pooled", "spatial"])
+def test_position_encoders_never_read_the_class_token(encoder):
+  experts = random_experts(3, "tiny_vit")
+  model = build_ensemble(
+    experts, [Exchange("block1", "block2")], ChannelConfig(encoder=encoder), CIFAR, 1, 0
+  )
+  enc = model.channels[0].encoders[0]
+  stream = experts[0].run(fake_data().test.x[:4], until="block1")
+  changed = stream.clone()
+  changed[:, :, 0] += 100.0
+  assert torch.allclose(enc(stream).value, enc(changed).value)
+
+
+@pytest.mark.parametrize("decoder", ["broadcast", "spatial"])
+def test_position_decoders_write_nothing_into_the_class_token(decoder):
+  experts = random_experts(3, "tiny_vit")
+  model = build_ensemble(
+    experts, [Exchange("block1", "block2")], ChannelConfig(decoder=decoder), CIFAR, 1, 0
+  )
+  for channel in model.channels:
+    for dec in channel.decoders:
+      for p in dec.parameters():  # leave the zero start, so something is written
+        torch.nn.init.normal_(p)
+  out = model(fake_data().test.x[:4])
+  (trace,) = out.traces
+  assert trace.tokens == 1
+  for injection in trace.injection:
+    assert not injection[:, :, 0].any()
+    assert injection[:, :, 1:].abs().sum() > 0
+
+
+def test_the_spatial_injection_metrics_skip_the_class_token():
+  """An injection the same at every grid position varies over none of them,
+  whatever goes into the class token."""
+  from testbed.metrics.exchanges import InjectionSums
+
+  injection = torch.ones(4, 8, 65)
+  injection[:, :, 0] = 5.0  # the class token, off the grid
+  sums = InjectionSums(tokens=1)
+  sums.add(injection)
+  assert sums.result()["resid_frac"] == pytest.approx(0.0, abs=1e-12)
+  counted = InjectionSums()  # had the token counted as a position
+  counted.add(injection)
+  assert counted.result()["resid_frac"] > 0.1
+
+
+# ---------------------------------------------------------------- building pools
+
+
+def test_pools_only_refuses_a_channel_or_gate():
+  from testbed.run import check_flags, parse_args
+
+  base = ["--arm", "pools", "--trial-seeds", "0", "--pools-only"]
+  for extra in (["--exchange", "block1", "block2"], ["--gate", "linear_taper_gelu"]):
+    with pytest.raises(SystemExit):
+      check_flags(parse_args(base + extra))
+
+
+def test_pools_only_fills_the_cache_and_trains_nothing_else(tmp_path, monkeypatch):
+  from functools import partial
+
+  import testbed.run as run
+  from testbed.experts import get_pool
+
+  def no_tracker(*args, **kwargs):
+    raise AssertionError("--pools-only must not open an MLflow run")
+
+  monkeypatch.setattr(run, "load", lambda *a, **k: fake_data())
+  monkeypatch.setattr(run, "get_pool", partial(get_pool, root=tmp_path))
+  monkeypatch.setattr(run, "MlflowTracker", no_tracker)
+  monkeypatch.setattr(run, "train", no_tracker)
+  run.main(
+    ["--arm", "pools", "--pools-only", "--arch", "tiny_resnet", "--expert-epochs", "1"]
+    + ["--scheme", "class_skew", "--trial-seeds", "0", "1", "--device", "cpu"]
+  )
+  assert len(list(tmp_path.glob("*.pt"))) == 2  # one pool per trial seed
