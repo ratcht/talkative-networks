@@ -48,7 +48,9 @@ def test_before_training_the_graft_is_the_anchor_alone(arch, name):
 @pytest.mark.parametrize("arch", ARCHS)
 @pytest.mark.parametrize("bypass", [False, True])
 def test_obligates_run_only_their_blocks_between_the_points(arch, bypass):
-  model = graft(arch, GraftConfig("block1", "block2", bypass=bypass)).eval()
+  # in training, where only the answer's path runs; evaluation also runs the rest
+  # of each obligate, for stitched_accuracy alone
+  model = graft(arch, GraftConfig("block1", "block2", bypass=bypass)).train()
   calls: dict[tuple[int, str], int] = {}
   for i, expert in enumerate(model.experts):
     for name, stage in expert.stages.items():
@@ -62,6 +64,53 @@ def test_obligates_run_only_their_blocks_between_the_points(arch, bypass):
   for i in range(1, len(model.experts)):
     ran = [n for n in names if calls.get((i, n))]
     assert ran == ([] if bypass else ["block2"])
+
+
+@pytest.mark.parametrize("arch", ARCHS)
+@pytest.mark.parametrize("bypass", [False, True])
+def test_the_obligates_answers_are_measured_never_used(arch, bypass):
+  model = graft(arch, GraftConfig("block1", "block2", bypass=bypass))
+  x = fake_data().test.x[:8]
+  with torch.no_grad():
+    for p in model.channel.out.parameters():  # open the return
+      p.normal_()
+    model.eval()
+    before = model(x)
+    head = list(model.experts[1].stages.values())[-1]
+    for p in head.parameters():  # an obligate's head: measured, never in the answer
+      p.add_(torch.randn_like(p))
+    after = model(x)
+    assert torch.equal(before.logits, after.logits)
+    answers = after.traces[0].obligate_answers
+    assert answers is not None and answers.shape == (8, len(model.experts) - 1)
+    model.train()
+    assert model(x).traces[0].obligate_answers is None
+
+
+def test_reply_dropout_acts_in_training_only():
+  channel = GraftChannel(GraftConfig(dropout=0.5), (8, 4, 4), 2)
+  with torch.no_grad():
+    for p in channel.out.parameters():
+      p.normal_()
+  anchor, replies = torch.randn(4, 8, 4, 4), [torch.randn(4, 8, 4, 4) for _ in range(2)]
+  channel.train()
+  a, b = (channel.mix(anchor, replies).injection for _ in range(2))
+  assert not torch.equal(a, b)
+  channel.eval()
+  a, b = (channel.mix(anchor, replies).injection for _ in range(2))
+  assert torch.equal(a, b)
+  with pytest.raises(ValueError, match="dropout"):
+    graft(config=GraftConfig("block1", "block2", dropout=1.0))
+
+
+def test_joint_augment_and_weight_decay_train_and_log_the_same_keys():
+  data = fake_data(n=200)
+  plain = train(graft(), data, JointConfig(epochs=1, batch_size=50), 0, Recorder())
+  extra = train(
+    graft(), data, JointConfig(epochs=1, batch_size=50, augment=True, weight_decay=0.05), 0, Recorder()
+  )
+  assert [set(s) for s in plain] == [set(s) for s in extra]
+  assert extra[0]["test/accuracy"] == plain[0]["test/accuracy"]  # the same start
 
 
 def test_the_class_token_goes_through_both_stitches():
@@ -169,6 +218,15 @@ def test_step_zero_is_the_anchor_alone(run):
   assert len(history) == 3
 
 
+def test_stitched_accuracy_is_logged_for_every_obligate(run):
+  _, model, _, history = run
+  obligates = len(model.experts) - 1
+  for step in history:
+    each = [v for k, v in step.items() if k.startswith("stitched_accuracy/expert")]
+    assert len(each) == obligates and all(0 <= v <= 1 for v in each)
+    assert step["stitched_accuracy/ex0"] == pytest.approx(sum(each) / obligates)
+
+
 def test_attention_shares_are_a_split_of_one(run):
   name, _, _, history = run
   for step in history:
@@ -184,6 +242,8 @@ def test_attention_shares_are_a_split_of_one(run):
 def test_graft_flags_need_graft():
   with pytest.raises(SystemExit, match="need --graft"):
     check_flags(parse_args(["--arm", "x", "--trial-seeds", "0", "--graft-bypass"]))
+  with pytest.raises(SystemExit, match="need --graft"):
+    check_flags(parse_args(["--arm", "x", "--trial-seeds", "0", "--graft-dropout", "0.1"]))
   with pytest.raises(SystemExit, match="its own model"):
     check_flags(
       parse_args(

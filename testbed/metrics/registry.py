@@ -159,6 +159,13 @@ METRICS = (
     "Share of the injection that differs between examples. 0 is a constant shift, not a message.",
   ),
   Metric(
+    "stitched_accuracy",
+    "Communication content",
+    ("stitched_accuracy/{site}", "stitched_accuracy/expert{i}/{site}"),
+    "A graft only: each obligate's accuracy when run from its stitched stream "
+    "through its own blocks and head. Measured; never part of the answer.",
+  ),
+  Metric(
     "inj_resid_frac",
     "Communication content",
     ("inj_resid_frac/{site}",),

@@ -145,6 +145,7 @@ def check_flags(args: argparse.Namespace) -> None:
     "--graft-stitch": args.graft_stitch is not None,
     "--graft-heads": args.graft_heads is not None,
     "--graft-bypass": args.graft_bypass,
+    "--graft-dropout": args.graft_dropout != GraftConfig.dropout,
   }
   if not args.graft and any(graft_flags.values()):
     given = ", ".join(flag for flag, set_ in graft_flags.items() if set_)
@@ -315,12 +316,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     action="store_true",
     help="the control: leave out the obligates' blocks between the two points",
   )
+  graft.add_argument(
+    "--graft-dropout",
+    type=float,
+    default=GraftConfig.dropout,
+    help="share of each obligate's projected stream zeroed in training",
+  )
 
   joint = p.add_argument_group("joint training")
   joint.add_argument("--epochs", type=int, default=10)
   joint.add_argument("--batch-size", type=int, default=128)
   joint.add_argument("--lr", type=float, default=1e-3)
   joint.add_argument("--loss", choices=("ensemble", "per_expert"), default="ensemble")
+  joint.add_argument(
+    "--joint-augment",
+    action="store_true",
+    help="crop and flip the joint split's images in training, as the experts' recipes do",
+  )
+  joint.add_argument(
+    "--weight-decay",
+    type=float,
+    default=JointConfig.weight_decay,
+    help="AdamW's decoupled weight decay on what joint training trains; 0 keeps Adam",
+  )
 
   tracking = p.add_argument_group("tracking")
   tracking.add_argument("--experiment", default="v4")
@@ -367,7 +385,14 @@ def main(
   selector = SELECTORS[
     args.selector or ("first" if pool_size == args.experts else "random")
   ]()
-  joint = JointConfig(args.epochs, args.batch_size, args.lr, args.loss)
+  joint = JointConfig(
+    args.epochs,
+    args.batch_size,
+    args.lr,
+    args.loss,
+    args.joint_augment,
+    args.weight_decay,
+  )
   grafting = (
     GraftConfig(
       read=args.graft_read,
@@ -376,6 +401,7 @@ def main(
       stitch=args.graft_stitch,
       heads=args.graft_heads,
       bypass=args.graft_bypass,
+      dropout=args.graft_dropout,
     )
     if args.graft
     else None

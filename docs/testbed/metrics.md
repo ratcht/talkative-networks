@@ -139,6 +139,7 @@ statement holds. $\operatorname{mean}_n$ averages over examples.
 | `inj_spread` | share of the injection that differs between examples | 0 at step 0 |
 | `inj_resid_frac` | share of the injection that differs between positions | 0 for the `broadcast` decoder |
 | `inj_rank` | number of distinct spatial patterns injected | 0 for `broadcast`; at most `width` for the linear taper decoders |
+| `stitched_accuracy` | a graft's obligates' accuracy, each run from its stitched stream to its own head | between 0 and 1; measured, never the answer |
 | `msg_rank_value`, `msg_rank_aggregated` | number of directions a sent or received message varies along | `msg_rank_value` at most `width` for the linear taper encoders |
 | `msg_rank_ratio` | directions received relative to directions sent | — |
 | `grad_norm` | size of the gradient reaching each part of the channel | — |
@@ -847,6 +848,28 @@ message. Rising above 1 needs two things: senders that vary in different
 directions, and mixing that draws on more than one of them. The ratio cannot
 say which is missing; `routing_mode_share` and `attn_top1` show whether the
 attention is pinned to one sender.
+
+### `stitched_accuracy`
+
+A graft only ([Grafting](grafting.md)). In evaluation, each obligate is also
+run from the stream its stitch made, through its own remaining blocks and its
+own head, and answers the image. This is the share of those answers that are
+right, for each obligate $j$ (`expert{j}`, numbered from 1 as in the group)
+and averaged over the obligates:
+
+$$
+\texttt{stitched_accuracy}_j = \operatorname*{mean}_n \, \big[\, \arg\max_c \, \mathrm{head}_j\big(x^{(j)}_{L}\big)_{n,c} = y_n \,\big] ,
+$$
+
+where $x^{(j)}_{L}$ is obligate $j$'s stream after its last block, run from
+$S_j(u)$ at the read point ([Grafting](grafting.md) §2). Model stitching scores
+a stitch the same way (Bansal et al. 2021).
+
+It measures what the stitch hands the obligate. It is computed in evaluation
+only, with no gradient, and the obligate's answer never enters the graft's.
+Read it against the obligate's own accuracy on the image: near it, the stitch
+hands the obligate a stream its blocks can use; near chance (1% on
+CIFAR-100), it does not. Measured on joint_val.
 
 ## 8. Training dynamics
 

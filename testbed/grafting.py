@@ -31,6 +31,13 @@ alone.
   bypass   the control: the same channel with the obligates' blocks from the
            read point to the write point left out, so the stitched stream goes
            straight to the return
+  dropout  share of each obligate's projected stream zeroed in training, before
+           the return mixes them; 0 by default
+
+In evaluation the graft also runs each obligate from its stitched stream
+through its own remaining blocks and head, and the meter scores that answer
+(stitched_accuracy). It is a measurement of what the stitch hands the
+obligate, with no gradient, and never part of the graft's answer.
 
 Only the channel trains: the stitches, the per-obligate projections (CALM's
 f_proj) and the attention's query, key, value and output maps.
@@ -57,6 +64,7 @@ class GraftConfig:
   stitch: str | None = None
   heads: int | None = None
   bypass: bool = False
+  dropout: float = 0.0
 
 
 class PointwiseLinear(nn.Module):
@@ -126,6 +134,7 @@ class GraftChannel(nn.Module):
     channels = stream_shape[0]
     stitch = STITCHES[config.stitch or default_stitch(stream_shape)]
     self.mixer = config.mixer
+    self.dropout = config.dropout
     self.heads = config.heads or max(1, channels // 32)
     if channels % self.heads:
       raise ValueError(f"{channels} channels don't split into {self.heads} heads")
@@ -144,7 +153,10 @@ class GraftChannel(nn.Module):
   def mix(self, anchor: torch.Tensor, replies: list[torch.Tensor]) -> Mixed:
     """The anchor's stream at the write point and every obligate's reply
     there -> what is added to the anchor's stream."""
-    projected = [project(rows(r)) for project, r in zip(self.project, replies)]
+    projected = [
+      F.dropout(project(rows(r)), self.dropout, self.training)
+      for project, r in zip(self.project, replies)
+    ]
     if self.mixer == "mean":
       received = self.value(torch.stack(projected).mean(0))  # (B, P, C)
       return Mixed(self._back(self.out(received), anchor))
@@ -183,6 +195,9 @@ class GraftTrace:
   tokens: int = 0  # leading positions of the stream that aren't grid positions
   site: str = "ex0"
   new_meter: type = field(default=GraftMeter, repr=False)
+  # (B, J): each obligate's own answer, run from its stitched stream through its
+  # remaining blocks and head; evaluation only, a measurement, never the answer
+  obligate_answers: torch.Tensor | None = None
 
 
 class GraftedEnsemble(nn.Module):
@@ -227,7 +242,15 @@ class GraftedEnsemble(nn.Module):
       ]
     mixed = self.channel.mix(at_write, replies)
     logits = anchor.run(at_write + mixed.injection, after=write)[:, None]  # (B, 1, C)
-    trace = GraftTrace(stitched, replies, mixed, self.tokens)
+    answers = None
+    if not self.training:  # stitched_accuracy: measured, never part of the answer
+      with torch.no_grad():
+        if self.config.bypass:
+          ends = [o.run(s, after=read) for o, s in zip(obligates, stitched)]
+        else:
+          ends = [o.run(r, after=write) for o, r in zip(obligates, replies)]
+      answers = torch.stack([end.argmax(-1) for end in ends], dim=1)
+    trace = GraftTrace(stitched, replies, mixed, self.tokens, obligate_answers=answers)
     return Output(F.log_softmax(logits[:, 0], -1), logits, [trace])
 
   def baseline(self, x: torch.Tensor) -> Output:
@@ -248,6 +271,8 @@ def build_graft(
     raise ValueError("a graft needs an anchor and at least one obligate")
   if config.mixer not in MIXERS:
     raise ValueError(f"unknown mixer {config.mixer!r}; choose from {MIXERS}")
+  if not 0 <= config.dropout < 1:
+    raise ValueError(f"dropout must be in [0, 1), not {config.dropout}")
   points = experts[0].points
   if any(e.points != points for e in experts):
     raise ValueError("experts must share their points")
@@ -271,6 +296,7 @@ def build_graft(
     config.stitch or default_stitch(shape),
     channel.heads,
     config.bypass,
+    config.dropout,
   )
   device = next(experts[0].parameters()).device
   return GraftedEnsemble(experts, channel, resolved).to(device)

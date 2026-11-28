@@ -46,6 +46,7 @@ counts as a position here.
 | | `--graft-mixer` | `attention` | `attention` or `mean` (§3) |
 | | `--graft-stitch` | the family's own (§2) | the outbound stitch |
 | | `--graft-bypass` | off | the control (§4) |
+| | `--graft-dropout` | 0 | share of each obligate's projected stream $s_j$ zeroed in training |
 
 ## 2. The pass
 
@@ -160,11 +161,17 @@ $r_j = S_j(u)$. It has exactly the graft's weights, and none of the
 obligates' own weights take part.
 
 In the graft, each obligate's skip connection carries $S_j(u)$ through its
-blocks to $d$, and a chain of linear maps is itself one linear map. So the
-graft can do everything the bypass does, plus whatever the obligates' frozen
-blocks add, and **graft − bypass**, trial seed by trial seed, measures those
-blocks. It cannot tell their training apart from frozen extra computation;
-an arm with untrained obligates would, and is left for later.
+blocks to $d$, but every block adds its own output on top, and the channel
+cannot take those outputs back out. In the ViT, whose blocks normalise their
+input, the stitch can at best scale $S_j(u)$ up until the blocks' outputs are
+small beside it; in the ResNet, where a block's output grows with its input,
+it cannot do even that. So the graft does not contain the bypass: running the
+obligates' blocks can help the return or get in its way, and
+**graft − bypass**, trial seed by trial seed, measures which, and by how
+much. A graft below its bypass says the channel does better without the
+blocks, not that what the obligates know is harmful. The difference cannot
+tell the blocks' training apart from frozen extra computation; an arm with
+untrained obligates would, and is left for later.
 
 ## 5. Size
 
@@ -203,6 +210,7 @@ obligates are numbered as in the group, from 1, since the anchor is expert 0.
 | `attn_heard` | `attn_heard/expert0/from{j}`: the anchor's attention on obligate $j$, summed over its positions, averaged over the anchor's positions, the heads and the images; the shares sum to 1 |
 | `attn_entropy`, `attn_top1` | over the obligates, after summing each obligate's positions: entropy runs from 0 (one obligate) to $\log(M-1)$, $\log 2 \approx 0.69$ for two; the largest share runs from $1/(M-1)$, 0.5 for two, to 1 |
 | `inj_spread`, `inj_resid_frac`, `inj_rank` | of $\Delta$, as for an ensemble's injection; the grid statistics leave the ViT's class token out |
+| `stitched_accuracy` | a graft's own: each obligate, run from its stitched stream through its remaining blocks and head, scored on joint_val; a measurement only, never part of the answer ([Metrics](metrics.md)) |
 | `grad_norm`, `update_ratio`, `weight_norm` | components `stitch`, `project`, `query`, `key`, `value` and `out`, all under `ex0` |
 
 Not yet logged for a graft: which positions an anchor position attends to,

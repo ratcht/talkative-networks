@@ -13,6 +13,10 @@ training, and again after every epoch, under the split it was measured on:
   joint_val  a full pass after the epoch, with every exchange's metrics and,
              for a backward exchange, the answers after each round
   test       a full pass after the epoch
+With --joint-augment the joint split's images are cropped and flipped as
+the experts' recipes do, on a stream of their own, so the batch order is
+unchanged; joint's metrics are then measured on the augmented images. With
+--weight-decay above 0 the optimiser is AdamW instead of Adam.
 Nothing here picks an epoch. Afterwards each run is boiled down to one number
 per metric, its median over the 5 epochs around its best joint_val epoch
 (testbed/results.py). Nothing selects on test.
@@ -27,6 +31,7 @@ import torch.nn.functional as F
 
 from testbed.communication.ensemble import CommunicatingEnsemble, Output, average
 from testbed.data import Data, Shuffle
+from testbed.experts.recipes import augment
 from testbed.moe import GatedEnsemble
 from testbed.metrics import (
   ExchangeMeter,
@@ -49,6 +54,8 @@ class JointConfig:
   batch_size: int = 128
   lr: float = 1e-3
   loss: str = "ensemble"
+  augment: bool = False  # crop and flip the joint split's images, as the experts' recipes do
+  weight_decay: float = 0.0  # > 0: AdamW's decoupled weight decay; 0 keeps plain Adam
 
 
 def loss_fn(
@@ -96,15 +103,26 @@ def train(
   if not params:  # no exchange: the ensemble is bagging, nothing to train
     return history
 
-  optimizer = torch.optim.Adam(params, lr=config.lr)
+  optimizer = (
+    torch.optim.AdamW(params, lr=config.lr, weight_decay=config.weight_decay)
+    if config.weight_decay
+    else torch.optim.Adam(params, lr=config.lr)
+  )
   optimisation = OptimisationMeter(model.trainable)
   gen = generator(derive(seed, "batches"), data.device)
+  # its own stream, so augmenting leaves the batch order unchanged
+  augment_gen = (
+    generator(derive(seed, "joint_augment"), data.device) if config.augment else None
+  )
   for _ in range(config.epochs):
     model.train()
     order = Shuffle(len(data.joint)).epoch(gen)
     logits, weights = [], []
     for idx in order.split(config.batch_size):
-      out = model(data.joint.x[idx])
+      x = data.joint.x[idx]
+      if augment_gen is not None:
+        x = augment(x, data.fill, augment_gen)
+      out = model(x)
       loss = loss_fn(out.logits, data.joint.y[idx], config.loss, out.weights)
       optimizer.zero_grad(set_to_none=True)
       loss.backward()

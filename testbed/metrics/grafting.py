@@ -25,8 +25,11 @@ class GraftMeter:
     self.entropy = 0.0
     self.top1 = 0.0
     self.count = 0  # (example, anchor position) pairs
+    self.answers: list[torch.Tensor] = []  # (B, J) per batch: obligates' own answers
 
   def add(self, trace) -> None:
+    if trace.obligate_answers is not None:
+      self.answers.append(trace.obligate_answers.detach())
     if self.injection is None:
       self.stitched = [InjectionSums() for _ in trace.stitched]
       self.replies = [InjectionSums() for _ in trace.replies]
@@ -49,9 +52,16 @@ class GraftMeter:
       self.count += s.shape[0] * s.shape[1]
 
   def result(self, pre, post, y, previous=None) -> tuple[dict[str, float], None]:
-    """pre, post and y are the split's answers, which these metrics don't use;
-    there is no route to carry over, so the second value is always None."""
+    """pre and post are the split's answers, which these metrics don't use; y
+    scores the obligates' own answers. There is no route to carry over, so the
+    second value is always None."""
     out = {}
+    if self.answers:  # each obligate run from its stitched stream to its own head
+      answers = torch.cat(self.answers)  # (N, J)
+      right = (answers == y.to(answers.device)[:, None]).double().mean(0)
+      for j, share in enumerate(right.tolist(), start=1):
+        out[f"stitched_accuracy/expert{j}"] = share
+      out["stitched_accuracy"] = right.mean().item()
     for name, sums in (("stitched", self.stitched), ("reply", self.replies)):
       stats = [s.result() for s in sums]
       out[f"msg_norm/{name}"] = mean(st["norm"] for st in stats)
