@@ -40,6 +40,28 @@ the other mixer; the anchor is fixed by the trial seed (the group's first
 expert); the middle third ($a$ = `block4`, $d$ = `block8`) as the default
 points until a pilot places them; the bypass as the control.
 
+## Fitted stitches
+
+`--stitch-fit` (in the study's runner, `studies/model_grafting/stitch_fit.py`)
+sets where the stitches start:
+
+| `--stitch-fit` | the stitches |
+|---|---|
+| `random` (default) | start from random weights, as decided above |
+| `fitted` | start from a least-squares fit, then train as usual |
+| `fitted_frozen` | stay the fit; only the return trains |
+
+The fit runs once, before training: the anchor and each obligate run the joint
+split's images up to the read point, and each stitch becomes the one affine map
+(the same at every cell) that best turns the anchor's stream there into that
+obligate's own (Csiszárik et al. 2021 start stitches this way). It needs the
+plain stitch, so the runner sets `--graft-stitch pointwise_linear`. This is the
+one place the obligates see images; their answers are never read, and in
+training and evaluation they still get only the stitched anchor stream. The
+user approved this departure on 2026-11-27 for these arms only, after the
+first overnight run found the random-start stitches leave the obligates at
+chance (`stitched_accuracy` 1.3%).
+
 ## Running an arm
 
     uv run python -m studies.model_grafting.run --graft-arm graft_attention --trial-seeds 0 1 2

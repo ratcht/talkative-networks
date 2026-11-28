@@ -33,6 +33,8 @@ from collections.abc import Callable
 from dataclasses import asdict, replace
 from statistics import mean
 
+import torch.nn as nn
+
 from testbed.communication import (
   DECODERS,
   ENCODERS,
@@ -355,10 +357,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(
   argv: list[str] | None = None,
-  adjust: Callable[[CommunicatingEnsemble, Data], None] | None = None,
+  adjust: Callable[[nn.Module, Data], None] | None = None,
 ) -> None:
-  """`adjust` lets a study change the built ensemble before it trains, for an
-  intervention that isn't a part. The run's tags should say what it did."""
+  """`adjust` lets a study change the built model (an ensemble, a gated
+  ensemble or a graft) before it trains, for an intervention that isn't a part.
+  The run's tags should say what it did."""
   args = parse_args(argv)
   check_flags(args)  # before loading anything, so bad flags fail fast
   tags = extra_tags(args) | code_version()
@@ -440,8 +443,9 @@ def main(
         args.rounds,
         derive(trial_seed, "channel"),
       )
-      if adjust:
-        adjust(model, data)
+
+    if adjust:
+      adjust(model, data)
 
     tracker = (
       NullTracker()
